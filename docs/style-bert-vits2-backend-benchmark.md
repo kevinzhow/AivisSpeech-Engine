@@ -174,8 +174,9 @@ Each preview is the `run00` AAC artifact for that backend and text. These
 previews are for qualitative listening only; the RTF table above comes from the
 no-audio runs. `--audio_output_dir` records each generated path in
 `records[].audio_path`, and AAC encoding runs outside the synthesis timer.
-The Ubuntu ONNX CPU and AMD 780M ggml/Vulkan previews below were refreshed after
-the 2026-06-25 ONNX-vs-GGML audio parity fix described in the next section.
+The Ubuntu ONNX CPU and both Linux ggml/Vulkan previews below were refreshed
+after the 2026-06-25 ONNX-vs-GGML audio parity fix described in the next
+section.
 
 GitHub's normal `github.com/.../blob/...md` Markdown preview sanitizes raw
 `<audio>` tags, so that view shows the fallback `AAC` links only. To get inline
@@ -241,18 +242,26 @@ ONNX-BERT frontend fixed showed ONNX CPU at `336383`, `336384`, `336382` samples
 and ggml/Vulkan native at `336384`, `336384`, `336384`; both paths stayed at
 `0.999969482` peak.
 
+The refreshed RTX 3060 ggml/Vulkan preview probe used
+`GGML_VK_VISIBLE_DEVICES=1` and confirmed TTS.cpp selected
+`NVIDIA GeForce RTX 3060`. The updated Linux NVIDIA Vulkan AAC previews reported
+`45568`, `76288`, and `336384` samples for short, medium, and long text, with
+the same `0.999969482` peak.
+
 The refreshed audio artifacts are stored in:
 
 ```text
 /tmp/aivis-style-bert-vits2-onnx-ggml-parity-fix-short-mid-long-20260625/
 /tmp/aivis-style-bert-vits2-onnx-ggml-parity-fix-notrim-runs3-20260625/
+/tmp/aivis-style-bert-vits2-onnx-ggml-parity-fix-rtx3060-audio-20260625/
 ```
 
-The repository preview files for Ubuntu ONNX CPU and AMD 780M ggml/Vulkan in
+The repository preview files for Ubuntu ONNX CPU, AMD 780M ggml/Vulkan, and RTX
+3060 ggml/Vulkan in
 `docs/res/style-bert-vits2-benchmark-20260625/representative-audio/` were
-regenerated from the short/medium/long parity probe. AAC byte sizes still should
-not be used as an accuracy metric because encoder decisions and stochastic TTS
-content can differ even when sample counts and level normalization match.
+regenerated from the post-fix parity probes. AAC byte sizes still should not be
+used as an accuracy metric because encoder decisions and stochastic TTS content
+can differ even when sample counts and level normalization match.
 
 ## Windows Intel Arc B580 Native Binding Result
 
