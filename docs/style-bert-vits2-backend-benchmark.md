@@ -13,7 +13,7 @@ is better.
 - Style: `888753760` from the local `まお` model.
 - ONNX model: AIVMX/ONNX baseline.
 - ggml model: AIVM/Safetensors metadata plus preconverted synthesis GGUF and
-  GGUF JP-BERT.
+  GGUF JP-BERT from Hugging Face `kevinzhow/style-bert-vits2-gguf`.
 - ggml path: native TTS.cpp binding, `tts-cpp-jp-bert`, `synthesize-front`.
 - SDP: `tempoDynamicsScale=0.0`.
 
@@ -51,8 +51,8 @@ ggml_vulkan: 0 = NVIDIA GeForce RTX 3060 (NVIDIA) | uma: 0 | fp16: 0 | bf16: 1 |
 | --- | --- | --- | --- |
 | ONNX CPU | AivisSpeech `StyleBertVITS2TTSEngine`, `tts_backend=onnx`, `use_gpu=False` | `.aivmx` / ONNX | Ryzen 7 8845HS CPU |
 | ONNX CUDA | AivisSpeech `StyleBertVITS2TTSEngine`, `tts_backend=onnx`, `use_gpu=True` | `.aivmx` / ONNX | RTX 3060 through `CUDAExecutionProvider` |
-| ggml Vulkan iGPU | AivisSpeech ggml backend through native TTS.cpp C API | `.aivm` / Safetensors + synthesis GGUF + JP-BERT GGUF | AMD Radeon 780M, `GGML_VK_VISIBLE_DEVICES=0` |
-| ggml Vulkan NVIDIA | AivisSpeech ggml backend through native TTS.cpp C API | `.aivm` / Safetensors + synthesis GGUF + JP-BERT GGUF | RTX 3060, `GGML_VK_VISIBLE_DEVICES=1` |
+| ggml Vulkan iGPU | AivisSpeech ggml backend through native TTS.cpp C API | `.aivm` / Safetensors + `kevinzhow/style-bert-vits2-gguf` synthesis GGUF + JP-BERT GGUF | AMD Radeon 780M, `GGML_VK_VISIBLE_DEVICES=0` |
+| ggml Vulkan NVIDIA | AivisSpeech ggml backend through native TTS.cpp C API | `.aivm` / Safetensors + `kevinzhow/style-bert-vits2-gguf` synthesis GGUF + JP-BERT GGUF | RTX 3060, `GGML_VK_VISIBLE_DEVICES=1` |
 | ggml Metal native | AivisSpeech ggml backend through native TTS.cpp C API | `.aivm` / Safetensors metadata + `kevinzhow/style-bert-vits2-gguf` synthesis GGUF + JP-BERT GGUF | Apple M1 Pro Metal |
 
 The ONNX CUDA run was accepted only after checking the loaded ONNX session's
@@ -83,46 +83,23 @@ This 2026-06-25 rerun pulled AivisSpeech-Engine to `1e079d9`, pulled TTS.cpp to
 `f389a96`, updated the TTS.cpp `ggml` submodule to `a9b84478`, and rebuilt both
 the native shared library and Vulkan `tts-server`. The RTF table is from
 no-audio benchmark runs so that AAC encoding does not perturb the AMD APU's
-CPU/iGPU shared power and memory budget. It uses
-`/tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/amd780m.json` for
-the ONNX CPU, ONNX CUDA, and AMD 780M ggml columns, and
-`/tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/rtx3060.json` for
-the RTX 3060 ggml column. The RTX 3060 run also repeated the ONNX baselines;
-those values are stored in the JSON artifact and were close to the AMD-run
-baseline values.
+CPU/iGPU shared power and memory budget. The ONNX CPU, ONNX CUDA, and AMD 780M
+ggml columns came from the AMD 780M JSON report; the RTX 3060 ggml column came
+from the RTX 3060 JSON report. The RTX 3060 run also repeated the ONNX
+baselines; those values were close to the AMD-run baseline values.
 
 An earlier same-day run generated AAC after every measured sample and made the
 AMD 780M ggml/Vulkan column look slower (`0.195` overall). A no-audio control
 run on the same checkout produced `0.178` overall, while TTS.cpp native synthesis
 time stayed essentially unchanged. The apparent regression came from
 interleaved ffmpeg AAC encoding disturbing the APU benchmark, not from the Vulkan
-synthesis path. The benchmark harness now queues AAC artifacts and encodes them
+synthesis path. The benchmark harness now queues AAC files and encodes them
 after a backend's measured synthesis loop.
 
-## Experimental Vulkan Fused ConvTranspose1D Result
+## Vulkan Fused ConvTranspose1D Evaluation
 
-This 2026-06-25 exploration pulled TTS.cpp to `8e26ac0` (`Default Style-Bert
-Metal to simdgroup AOT conv transpose`) and ggml to `b6ad57d8` (`Add Style-Bert
-simdgroup AOT conv transpose`). The checked-out TTS.cpp tree then carried a
-local unmerged Vulkan patch that ports the useful non-Metal parts of that work:
-
-- `STYLE_BERT_VITS2_VULKAN_FUSED_CONV_TRANSPOSE_1D=1` enables a fused
-  `pre_relu + ConvTranspose1D + crop + bias` Vulkan op.
-- `STYLE_BERT_VITS2_VULKAN_FUSED_UPSAMPLE_PRE_RELU=1` folds the upsample
-  block's pre-relu into that fused op.
-- `STYLE_BERT_VITS2_VULKAN_CONV_TRANSPOSE_1D_KERNEL` selects `scalar`,
-  `phase_k64`, `phase_k128`, or `aot`.
-
-The Metal half/simdgroup matrix idea should not be copied directly to these
-Linux Vulkan devices yet. TTS.cpp reported no usable fp16 or matrix-core path on
-either measured GPU:
-
-```text
-ggml_vulkan: 0 = AMD Radeon 780M Graphics (RADV PHOENIX) (radv) | uma: 1 | fp16: 0 | bf16: 0 | warp size: 64 | shared memory: 65536 | int dot: 1 | matrix cores: none
-ggml_vulkan: 0 = NVIDIA GeForce RTX 3060 (NVIDIA) | uma: 0 | fp16: 0 | bf16: 1 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: none
-```
-
-RTF results, same text set and `warm_steady_state` profile:
+Same text set and `warm_steady_state` profile, using the local fused
+ConvTranspose1D Vulkan patch on top of TTS.cpp `8e26ac0` / ggml `b6ad57d8`.
 
 | device | Vulkan ConvTranspose1D path | overall RTF | short RTF | medium RTF | long RTF |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -134,17 +111,8 @@ RTF results, same text set and `warm_steady_state` profile:
 | RTX 3060 | `scalar` fused | `0.0980` | `0.1415` | `0.0954` | `0.0571` |
 | RTX 3060 | `aot` fused | `0.0988` | `0.1420` | `0.0979` | `0.0565` |
 
-Interpretation:
-
-- AMD 780M benefits most from the f32 phase-tiled path. `phase_k64` reduces
-  overall RTF from `0.1775` to `0.1559`, a `12.2%` improvement, and reduces the
-  long-text RTF from `0.1290` to `0.1093`, a `15.3%` improvement.
-- On RTX 3060, the fused op itself helps, but `aot` is not the best default in
-  this local run. Keep `scalar` as the safer NVIDIA Vulkan selector until a
-  separate NVIDIA-specific shader strategy is proven.
-- The five AOT shape-specialized Vulkan pipelines compile and run, but on AMD
-  780M they are effectively tied with generic `phase_k64`, and on RTX 3060 they
-  are slightly slower overall than `scalar`.
+Best observed rows: AMD 780M `phase_k64` at `0.1559` overall RTF, RTX 3060
+`scalar` at `0.0980` overall RTF.
 
 Decoder fixture parity stayed within the existing deterministic tolerance:
 
@@ -153,55 +121,15 @@ Decoder fixture parity stayed within the existing deterministic tolerance:
 | AMD 780M `phase_k64` / `aot` | `0.00140219` | `8.28174e-05` |
 | RTX 3060 `aot` | `0.00113783` | `7.45232e-05` |
 
-Artifacts:
-
-- AMD baseline:
-  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage1/amd780m.json`
-- AMD fused selector matrix:
-  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage3/rtf-*.json`
-- RTX 3060 fused selector matrix:
-  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage4/rtx3060-rtf-*.json`
-- AOT pipeline proof:
-  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage3/backend-compare-aot-pipeline-stats.log`
-- Decoder fixture parity:
-  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage3/backend-compare-aot.log`
-  and
-  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage4/backend-compare-rtx3060-aot.log`
-
 ## Linux Vulkan Audio Preview
 
-Each preview is the `run00` AAC artifact for that backend and text. These
+Each preview is the `run00` AAC file for that backend and text. These
 previews are for qualitative listening only; the RTF table above comes from the
 no-audio runs. `--audio_output_dir` records each generated path in
 `records[].audio_path`, and AAC encoding runs outside the synthesis timer.
 The Ubuntu ONNX CPU and both Linux ggml/Vulkan previews below were refreshed
 after the 2026-06-25 ONNX-vs-GGML audio parity fix described in the next
 section.
-
-GitHub's normal `github.com/.../blob/...md` Markdown preview sanitizes raw
-`<audio>` tags, so that view shows the fallback `AAC` links only. To get inline
-players instead of file/download pages, serve this document through GitHub Pages:
-
-1. In repository settings, open `Pages`.
-2. Set `Build and deployment` to `Deploy from a branch`.
-3. Select branch `master` and folder `/docs`.
-4. Open `https://kevinzhow.github.io/AivisSpeech-Engine/style-bert-vits2-backend-benchmark.html`.
-
-Equivalent GitHub CLI command when Pages is not enabled yet:
-
-```bash
-gh api \
-  --method POST \
-  repos/kevinzhow/AivisSpeech-Engine/pages \
-  -f build_type=legacy \
-  -f 'source[branch]=master' \
-  -f 'source[path]=/docs'
-```
-
-There is no repository setting that enables `<audio>` inside ordinary GitHub
-repo Markdown previews; GitHub Pages is the path that preserves the HTML audio
-controls. Do not add `.nojekyll` to `/docs` for this path, because Pages should
-let Jekyll render the Markdown file into an HTML page.
 
 | text length | ONNX CPU | ONNX CUDA | ggml Vulkan AMD 780M | ggml Vulkan RTX 3060 |
 | --- | --- | --- | --- | --- |
@@ -211,7 +139,7 @@ let Jekyll render the Markdown file into an HTML page.
 
 ## ONNX vs GGML Audio Parity Fix
 
-The 2026-06-25 audio investigation found that the visible long-sentence file
+The 2026-06-25 audio validation found that the visible long-sentence file
 size and loudness mismatch was not a Vulkan precision regression. The ONNX path
 uses Style-Bert-VITS2's `convert_to_16_bit_wav()` behavior: float output is
 peak-normalized over the whole utterance before conversion to PCM16. The GGML
@@ -224,9 +152,9 @@ The fix is to normalize GGML sidecar/native PCM16 at the backend boundary using
 the same peak-normalization rule and then skip the engine-level threshold trim
 for served `ggml-*` backends. ONNX keeps the existing trim behavior.
 
-Post-fix cold parity probe on the AMD 780M, native binding, `tts-cpp-jp-bert`,
+Post-fix cold parity validation on the AMD 780M, native binding, `tts-cpp-jp-bert`,
 `synthesize-front`, one run per text. This table intentionally omits RTF:
-the probe used `cold_smoke` (`--warmup_runs 0 --runs 1`) and exists only to
+the run used `cold_smoke` (`--warmup_runs 0 --runs 1`) and exists only to
 validate output shape, level, and preview audio. Use the `Linux Vulkan Results`
 section above for comparable `warm_steady_state` RTF numbers.
 
@@ -240,60 +168,30 @@ section above for comparable `warm_steady_state` RTF numbers.
 | long | ggml Vulkan AMD 780M | `336384` | `7.627755` | `0.999969482` |
 
 The short one-sample difference is one output sample at 44.1 kHz. The medium and
-long sample counts match exactly. A follow-up long-text three-run probe with the
+long sample counts match exactly. A follow-up long-text three-run validation with the
 ONNX-BERT frontend fixed showed ONNX CPU at `336383`, `336384`, `336382` samples
 and ggml/Vulkan native at `336384`, `336384`, `336384`; both paths stayed at
 `0.999969482` peak.
 
-The refreshed RTX 3060 ggml/Vulkan preview probe used
+The refreshed RTX 3060 ggml/Vulkan preview validation used
 `GGML_VK_VISIBLE_DEVICES=1` and confirmed TTS.cpp selected
 `NVIDIA GeForce RTX 3060`. The updated Linux NVIDIA Vulkan AAC previews reported
 `45568`, `76288`, and `336384` samples for short, medium, and long text, with
 the same `0.999969482` peak.
 
-The refreshed audio artifacts are stored in:
-
-```text
-/tmp/aivis-style-bert-vits2-onnx-ggml-parity-fix-short-mid-long-20260625/
-/tmp/aivis-style-bert-vits2-onnx-ggml-parity-fix-notrim-runs3-20260625/
-/tmp/aivis-style-bert-vits2-onnx-ggml-parity-fix-rtx3060-audio-20260625/
-```
-
 The repository preview files for Ubuntu ONNX CPU, AMD 780M ggml/Vulkan, and RTX
 3060 ggml/Vulkan in
 `docs/res/style-bert-vits2-benchmark-20260625/representative-audio/` were
-regenerated from the post-fix parity probes. AAC byte sizes still should not be
-used as an accuracy metric because encoder decisions and stochastic TTS content
-can differ even when sample counts and level normalization match.
+regenerated from the post-fix parity validation runs. AAC byte sizes are not an
+accuracy metric because encoder decisions and stochastic TTS content can differ
+even when sample counts and level normalization match.
 
 ## Windows Intel Arc B580 Native Binding Result
 
 This run was captured on 2026-06-25, Asia/Tokyo, on Windows 11 with an
-Intel(R) Arc(TM) B580 Graphics device using driver `32.0.101.8826`.
-
-The local TTS.cpp checkout was updated to `ea100b4` (`Export Style-Bert-VITS2
-native C API`) and built as a shared Vulkan library. The build required one
-local CMake fix for shared Windows linking: `src/CMakeLists.txt` adds
-`../ggml-patches/llama-mmap.cpp` to the `tts` target so `tts.dll` contains the
-model loader's mmap implementation.
-
-Build artifact:
-
-```text
-C:\Users\kevin\TTS.cpp\build-vulkan-native\bin\tts.dll
-```
-
-Benchmark artifact:
-
-```text
-C:\Users\kevin\run-logs\aivis-style-bert-vits2-b580-native-warm.json
-```
-
-The run used `--warmup_runs 1 --runs 3`, `tts-cpp-jp-bert`,
-`synthesize-front`, `accurate` Vulkan precision, and
-`--ggml_native_library_path C:\Users\kevin\TTS.cpp\build-vulkan-native\bin\tts.dll`.
-The benchmark transport was `native-binding`; no sidecar process or HTTP
-transport was used.
+Intel(R) Arc(TM) B580 Graphics device using driver `32.0.101.8826`. The run used
+`--warmup_runs 1 --runs 3`, `tts-cpp-jp-bert`, `synthesize-front`, `accurate`
+Vulkan precision, and native binding transport.
 
 The captured Vulkan device evidence was:
 
@@ -317,30 +215,14 @@ Native timing breakdown:
 | medium | `0.059` | `0.102` | `0.060` | `156.5 KiB` |
 | long | `0.077` | `0.331` | `0.080` | `782.3 KiB` |
 
-Interpretation:
-
-- The Windows Intel Arc B580 native binding path is active and faster than ONNX
-  CPU in this run, with overall ggml/Vulkan RTF at `26.2%` of ONNX CPU.
-- The native C API path excludes sidecar HTTP, base64 payload, and WAV decode
-  overhead from the ggml timing path.
-- Short text remains more overhead-sensitive than long text. The long text
-  amortizes frontend and native call overhead best, reaching `0.055` RTF.
+The Windows Intel Arc B580 native binding path is faster than ONNX CPU in this
+run, with overall ggml/Vulkan RTF at `26.2%` of ONNX CPU.
 
 ## macOS Metal Native Result
 
-This run used the TTS.cpp native C API from `libtts.dylib`, not the managed
-`tts-server` sidecar. It used `kevinzhow/style-bert-vits2-gguf` for the
-preconverted `mao-full-sdp.gguf` and JP-BERT GGUF artifacts. The TTS.cpp build
-includes the Style-Bert decoder-specific Metal AOT simdgroup-half
-ConvTranspose1D path from TTS.cpp `a120f9e` / ggml `a78c352b`. It decomposes
-output by stride phase, maps each phase to a matrix multiply tile, uses half
-input/weight tiles with fp32 accumulation, writes cropped output directly, and
-fuses the bias add. The decoder now also fuses the large resblock Conv1D
-epilogues: pre-LeakyReLU input transform, Conv1D, bias add, and optional
-residual add are emitted as one Kokoro Conv1D Metal op. The previous f32
-phase-tiled ConvTranspose path remains available with
-`STYLE_BERT_VITS2_METAL_CONV_TRANSPOSE_1D_KERNEL=phase_32x32_k128`; the fused
-Conv1D epilogue can be disabled with `STYLE_BERT_VITS2_METAL_FUSED_CONV1D=0`.
+This run used the TTS.cpp native C API from `libtts.dylib`, TTS.cpp `a120f9e`,
+ggml `a78c352b`, and preconverted synthesis / JP-BERT GGUF files from
+`kevinzhow/style-bert-vits2-gguf`.
 
 | text length | ONNX CPU RTF | ggml Metal native RTF | Metal/ONNX CPU ratio |
 | --- | ---: | ---: | ---: |
@@ -357,25 +239,7 @@ Native timing breakdown for `ggml-metal-jp-bert-native`:
 | medium | `0.052` | `0.211` | `0.052` |
 | long | `0.076` | `0.874` | `0.074` |
 
-The result JSON is
-`/tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d.json`; the
-log is `/tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d.log`. The
-log showed:
-
-```text
-ggml_metal_device_init: GPU name:   MTL0 (Apple M1 Pro)
-ggml_metal_device_init: use residency sets    = false
-ggml_metal_init: found device: Apple M1 Pro
-Using TTS.cpp ggml/metal native binding at /Users/kevinzhow/Github/TTS.cpp/build-metal-shared/src/libtts.dylib.
-kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k16_s8_ic512_crop4_f32
-kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k16_s8_ic256_crop4_f32
-kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k8_s2_ic128_crop3_f32
-kernel_kokoro_conv_1d_f32
-kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k2_s2_ic64_crop0_f32
-kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k2_s2_ic32_crop0_f32
-```
-
-The AAC previews below are representative `run00` artifacts from the same
+The AAC previews below are representative `run00` outputs from the same
 backend and text set. AAC encoding runs after the synthesis timer, so these
 files are not included in the RTF values above.
 
@@ -385,12 +249,8 @@ files are not included in the RTF values above.
 | medium | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_medium.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_medium.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_medium.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_medium.m4a) |
 | long | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_long.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_long.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_long.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_long.m4a) |
 
-The AOT simdgroup-half ConvTranspose1D path is enabled by default when the native
-binding sets `TTS_BACKEND=metal` on a Metal device with simdgroup matrix support.
-The f32 phase-tiled and scalar fused paths are retained as explicit rollback
-modes. A one-text native binding probe with `--warmup_runs 1 --runs 3` on the
-same long input compared the f32 phase-tiled path, AOT without Conv1D epilogue
-fusion, and the new default:
+A one-text native binding comparison on the same long input measured the active
+Metal decoder variants:
 
 | Metal decoder path | RTF | native synthesis seconds | decoder seconds | decoder nodes |
 | --- | ---: | ---: | ---: | ---: |
@@ -398,106 +258,39 @@ fusion, and the new default:
 | AOT simdgroup-half, `STYLE_BERT_VITS2_METAL_FUSED_CONV1D=0` | `0.137` | `1.406` | `0.939` | `428` |
 | default AOT simdgroup-half + fused Conv1D epilogue | `0.133` | `1.364` | `0.896` | `248` |
 
-For that one-text probe, the fused Conv1D epilogue reduced native synthesis time
-by `3.0%`, RTF by `2.8%`, and decoder time by `4.6%` compared with the same AOT
-ConvTranspose path with `STYLE_BERT_VITS2_METAL_FUSED_CONV1D=0`. On the
-three-text no-AAC benchmark, the same A/B changed overall Metal RTF from
-`0.16568` to `0.16367`, long-text native synthesis from `0.89849s` to
-`0.87558s`, and long-text decoder time from about `636ms` to `611ms`.
-
 The default fused decoder fixture stayed within tolerance:
-`max_abs=0.000594173`, `rms=7.4558e-05`. The f32 phase-tiled ConvTranspose
-rollback fixture reported `max_abs=0.000498002`, `rms=7.29653e-05`; the
-`STYLE_BERT_VITS2_METAL_FUSED_CONV1D=0` rollback fixture reported the same final
-decoder tolerance as the default fused path.
+`max_abs=0.000594173`, `rms=7.4558e-05`.
 
-## Reproduction
+## Evaluation Commands
 
-The ONNX CUDA baseline on this host required CUDA 12/cuDNN 9 compatible runtime
-libraries. The system CUDA installation was not sufficient for
-`onnxruntime-gpu 1.26.0`, so the benchmark prepended the CUDA 12 NVIDIA wheel
-libraries from the local qwen3-tts.cpp virtualenv:
+The Linux RTF table was generated without AAC output so encoding would not
+perturb the AMD APU measurements. Set these paths for your local checkout before
+running the commands:
 
 ```bash
-CUDA12_NVIDIA_LIBS="$(
-  find /home/kevinzhow/github/qwen3-tts.cpp/.venv/lib/python3.13/site-packages/nvidia \
-    -maxdepth 3 \
-    -type d \
-    -name lib \
-    | paste -sd: -
-)"
+export CUDA12_NVIDIA_LIBS="<colon-separated CUDA 12/cuDNN library dirs>"
+export AIVM_PATH="<path-to-mao.aivm>"
+export AIVMX_PATH="<path-to-mao.aivmx>"
+export SYNTHESIS_GGUF_PATH="<path-to-HF-kevinzhow/style-bert-vits2-gguf/voices/mao-full-sdp.gguf>"
+export JP_BERT_GGUF_PATH="<path-to-HF-kevinzhow/style-bert-vits2-gguf/frontend/style-bert-vits2-jp-bert.gguf>"
+export TTS_CPP_DIR="<path-to-TTS.cpp>"
+export TTS_CPP_VULKAN_BUILD_DIR="$TTS_CPP_DIR/build-vulkan-latest-main"
+export TTS_CPP_NATIVE_BUILD_DIR="$TTS_CPP_DIR/build-native-binding-shared"
+export BENCHMARK_OUTPUT_DIR="<path-to-benchmark-output-dir>"
 ```
 
-### Model Artifacts
-
-The benchmark uses the public `まお` model:
-
-| field | value |
-| --- | --- |
-| AivisHub UUID | `a59cb814-0083-4369-8542-f51a29e72af7` |
-| version | `1.2.0` |
-| AIVM/Safetensors size | `259776543` bytes |
-| AIVMX/ONNX size | `258037076` bytes |
-
-AivisHub exposes both source formats for the same model UUID. `AIVMX` is the
-ONNX baseline input. `AIVM` is the Safetensors metadata/source package used by
-the benchmark and by GGUF rebuilds:
-
-```bash
-MAO_MODEL_UUID=a59cb814-0083-4369-8542-f51a29e72af7
-
-curl -L \
-  -o /path/to/mao.aivm \
-  "https://api.aivis-project.com/v1/aivm-models/${MAO_MODEL_UUID}/download?model_type=AIVM"
-
-curl -L \
-  -o /path/to/mao.aivmx \
-  "https://api.aivis-project.com/v1/aivm-models/${MAO_MODEL_UUID}/download?model_type=AIVMX"
-```
-
-The synthesis and JP-BERT GGUF artifacts should be downloaded from the
-preconverted Hugging Face bundle:
-
-```bash
-hf download kevinzhow/style-bert-vits2-gguf \
-  voices/mao-full-sdp.gguf \
-  frontend/style-bert-vits2-jp-bert.gguf \
-  --local-dir /path/to/TTS.cpp/tmp/style-bert-vits2-gguf
-```
-
-| artifact | size | SHA-256 |
-| --- | ---: | --- |
-| `voices/mao-full-sdp.gguf` | `251099936` bytes | `51dd69888d62f16a54d48732cbfe789f326bc4192bd8f6b2876f8ed0b6807f71` |
-| `frontend/style-bert-vits2-jp-bert.gguf` | `1314386784` bytes | `e10f4de90fb9f1aadbf2e5f79453406ff60a4fe77b6a4d314b1ee226118ecebf` |
-
-If the GGUF needs to be rebuilt from source, use TTS.cpp's
-`py-gguf/convert_style_bert_vits2_to_gguf` or the Engine's `AivmGgufCache`.
-For normal benchmark reproduction, use the preconverted HF artifacts above.
-
-Experimental local Vulkan fused ConvTranspose1D runs require the local TTS.cpp
-patch described above. Add these environment variables to the Vulkan command:
-
-```bash
-STYLE_BERT_VITS2_VULKAN_FUSED_CONV_TRANSPOSE_1D=1 \
-STYLE_BERT_VITS2_VULKAN_FUSED_UPSAMPLE_PRE_RELU=1 \
-STYLE_BERT_VITS2_VULKAN_CONV_TRANSPOSE_1D_KERNEL=phase_k64 \
-```
-
-Use `phase_k64` for the AMD 780M iGPU result. Use `scalar` for the RTX 3060
-result unless a newer NVIDIA-specific shader path has been benchmarked.
-
-AMD 780M iGPU RTF run:
+AMD 780M iGPU:
 
 ```bash
 LD_LIBRARY_PATH="${CUDA12_NVIDIA_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
 GGML_VK_VISIBLE_DEVICES=0 \
 uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
-  --aivm_path /home/kevinzhow/github/kokoro-tts/tmp/style-bert-vits2-assets/_downloads/mao.aivm \
-  --aivmx_path /home/kevinzhow/github/kokoro-tts/tmp/aivisspeech-engine-data/Models/a59cb814-0083-4369-8542-f51a29e72af7.aivmx \
-  --gguf_path /home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-voices/mao-full-sdp.gguf \
-  --jp_bert_gguf_path /home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-jp-bert.gguf \
-  --tts_server_path /home/kevinzhow/github/TTS.cpp/build-vulkan-latest-main/bin/tts-server \
-  --ggml_native_library_path /home/kevinzhow/github/TTS.cpp/build-native-binding-shared/src/libtts.so \
+  --aivm_path "$AIVM_PATH" \
+  --aivmx_path "$AIVMX_PATH" \
+  --gguf_path "$SYNTHESIS_GGUF_PATH" \
+  --jp_bert_gguf_path "$JP_BERT_GGUF_PATH" \
+  --tts_server_path "$TTS_CPP_VULKAN_BUILD_DIR/bin/tts-server" \
+  --ggml_native_library_path "$TTS_CPP_NATIVE_BUILD_DIR/src/libtts.so" \
   --onnx_baseline cpu \
   --onnx_baseline cuda \
   --ggml_backend vulkan \
@@ -510,22 +303,22 @@ uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --text 'これは少し長めの文章です。GPUバックエンドの推論速度と音声品質を確認しています。' \
   --warmup_runs 1 \
   --runs 3 \
-  --output_json /tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/amd780m.json \
-  > /tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/amd780m.log 2>&1
+  --output_json "$BENCHMARK_OUTPUT_DIR/amd780m.json" \
+  > "$BENCHMARK_OUTPUT_DIR/amd780m.log" 2>&1
 ```
 
-RTX 3060 Vulkan RTF run:
+RTX 3060:
 
 ```bash
 LD_LIBRARY_PATH="${CUDA12_NVIDIA_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
 GGML_VK_VISIBLE_DEVICES=1 \
 uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
-  --aivm_path /home/kevinzhow/github/kokoro-tts/tmp/style-bert-vits2-assets/_downloads/mao.aivm \
-  --aivmx_path /home/kevinzhow/github/kokoro-tts/tmp/aivisspeech-engine-data/Models/a59cb814-0083-4369-8542-f51a29e72af7.aivmx \
-  --gguf_path /home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-voices/mao-full-sdp.gguf \
-  --jp_bert_gguf_path /home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-jp-bert.gguf \
-  --tts_server_path /home/kevinzhow/github/TTS.cpp/build-vulkan-latest-main/bin/tts-server \
-  --ggml_native_library_path /home/kevinzhow/github/TTS.cpp/build-native-binding-shared/src/libtts.so \
+  --aivm_path "$AIVM_PATH" \
+  --aivmx_path "$AIVMX_PATH" \
+  --gguf_path "$SYNTHESIS_GGUF_PATH" \
+  --jp_bert_gguf_path "$JP_BERT_GGUF_PATH" \
+  --tts_server_path "$TTS_CPP_VULKAN_BUILD_DIR/bin/tts-server" \
+  --ggml_native_library_path "$TTS_CPP_NATIVE_BUILD_DIR/src/libtts.so" \
   --onnx_baseline cpu \
   --onnx_baseline cuda \
   --ggml_backend vulkan \
@@ -538,46 +331,31 @@ uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --text 'これは少し長めの文章です。GPUバックエンドの推論速度と音声品質を確認しています。' \
   --warmup_runs 1 \
   --runs 3 \
-  --output_json /tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/rtx3060.json \
-  > /tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/rtx3060.log 2>&1
+  --output_json "$BENCHMARK_OUTPUT_DIR/rtx3060.json" \
+  > "$BENCHMARK_OUTPUT_DIR/rtx3060.log" 2>&1
 ```
 
-To regenerate the qualitative audio previews for GitHub Pages, run the same
-command with `--audio_output_dir` and use a separate JSON output path. The
-benchmark harness writes AAC files after each backend's measured synthesis loop,
-but the publication RTF table should still come from the no-audio command above:
+For AAC preview regeneration, add these flags to a separate run:
 
 ```text
---audio_output_dir /tmp/aivis-style-bert-vits2-benchmark-20260625/audio-preview
---output_json /tmp/aivis-style-bert-vits2-benchmark-20260625/audio-preview.json
+--audio_output_dir "$BENCHMARK_OUTPUT_DIR/audio-preview"
+--output_json "$BENCHMARK_OUTPUT_DIR/audio-preview.json"
 ```
 
-macOS Metal local run:
+macOS Metal:
 
 ```bash
-git -C /Users/kevinzhow/Github/TTS.cpp pull --ff-only origin main
-git -C /Users/kevinzhow/Github/TTS.cpp submodule update --init --recursive
-
-cmake -S /Users/kevinzhow/Github/TTS.cpp \
-  -B /Users/kevinzhow/Github/TTS.cpp/build-metal-shared \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DGGML_METAL=ON \
-  -DBUILD_SHARED_LIBS=ON
-
-cmake --build /Users/kevinzhow/Github/TTS.cpp/build-metal-shared \
-  --target tts \
-  -j "$(sysctl -n hw.ncpu)"
-
-DYLD_LIBRARY_PATH="/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/src:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src/ggml-blas:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src/ggml-metal:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src/ggml-cpu" \
+TTS_CPP_METAL_BUILD_DIR="$TTS_CPP_DIR/build-metal-shared" \
+DYLD_LIBRARY_PATH="$TTS_CPP_METAL_BUILD_DIR/src:$TTS_CPP_METAL_BUILD_DIR/ggml/src:$TTS_CPP_METAL_BUILD_DIR/ggml/src/ggml-blas:$TTS_CPP_METAL_BUILD_DIR/ggml/src/ggml-metal:$TTS_CPP_METAL_BUILD_DIR/ggml/src/ggml-cpu" \
 GGML_METAL_NO_RESIDENCY=1 \
 STYLE_BERT_VITS2_DEBUG_TIMINGS=1 \
 uv run --group dev python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
-  --aivm_path /Users/kevinzhow/.Trash/まお.aivm \
-  --aivmx_path "/Users/kevinzhow/Library/Application Support/AivisSpeech-Engine/Models/a59cb814-0083-4369-8542-f51a29e72af7.aivmx" \
-  --gguf_path /Users/kevinzhow/Github/TTS.cpp/tmp/style-bert-vits2-gguf/voices/mao-full-sdp.gguf \
-  --jp_bert_gguf_path /Users/kevinzhow/Github/TTS.cpp/tmp/style-bert-vits2-gguf/frontend/style-bert-vits2-jp-bert.gguf \
-  --tts_server_path /Users/kevinzhow/Github/TTS.cpp/build-metal/bin/tts-server \
-  --ggml_native_library_path /Users/kevinzhow/Github/TTS.cpp/build-metal-shared/src/libtts.dylib \
+  --aivm_path "$AIVM_PATH" \
+  --aivmx_path "$AIVMX_PATH" \
+  --gguf_path "$SYNTHESIS_GGUF_PATH" \
+  --jp_bert_gguf_path "$JP_BERT_GGUF_PATH" \
+  --tts_server_path "$TTS_CPP_DIR/build-metal/bin/tts-server" \
+  --ggml_native_library_path "$TTS_CPP_METAL_BUILD_DIR/src/libtts.dylib" \
   --onnx_baseline cpu \
   --ggml_backend metal \
   --ggml_frontend tts-cpp-jp-bert \
@@ -588,16 +366,6 @@ uv run --group dev python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --text 'これは少し長めの文章です。GPUバックエンドの推論速度と音声品質を確認しています。' \
   --warmup_runs 1 \
   --runs 3 \
-  --output_json /tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d.json \
-  > /tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d.log 2>&1
+  --output_json "$BENCHMARK_OUTPUT_DIR/metal-native-aot-fused-conv1d.json" \
+  > "$BENCHMARK_OUTPUT_DIR/metal-native-aot-fused-conv1d.log" 2>&1
 ```
-
-To regenerate the macOS AAC preview files, rerun the same command with:
-
-```bash
-  --audio_output_dir /tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d-audio
-```
-
-The Metal native run is labeled as `ggml-metal-jp-bert-native` in the JSON
-report. `GGML_METAL_NO_RESIDENCY=1` avoids a ggml Metal process-exit assert
-observed on the macOS 27.0 / Apple M1 Pro local test host.
