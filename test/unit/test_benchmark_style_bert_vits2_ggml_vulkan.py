@@ -13,10 +13,13 @@ from tools.benchmark_style_bert_vits2_ggml_vulkan import (
     _extract_vulkan_device_log_evidence,
     _GgmlBackendSpec,
     _parse_ggml_backend_specs,
+    _parse_onnx_baseline_specs,
+    _provider_names,
     _read_sidecar_diagnostics,
     _rtf_ratios_vs_backend,
     _summarize_backend_timings_by_text,
     _summarize_by_text,
+    _validate_onnx_baseline_provider,
 )
 
 
@@ -396,6 +399,57 @@ def test_parse_ggml_backend_specs_keeps_default_vulkan_name_compatible() -> None
             require_style_bert_timings=False,
         )
     ]
+
+
+def test_parse_onnx_baseline_specs_defaults_to_cpu() -> None:
+    """ONNX CPU remains the default benchmark baseline."""
+
+    specs = _parse_onnx_baseline_specs(Namespace(onnx_baseline=None))
+
+    assert [spec.name for spec in specs] == ["onnx-cpu"]
+    assert [spec.use_gpu for spec in specs] == [False]
+    assert [spec.required_provider for spec in specs] == [None]
+
+
+def test_parse_onnx_baseline_specs_can_include_cuda() -> None:
+    """The benchmark can compare ONNX CPU and CUDA baselines."""
+
+    specs = _parse_onnx_baseline_specs(
+        Namespace(onnx_baseline=["cpu", "cuda"])
+    )
+
+    assert [spec.name for spec in specs] == ["onnx-cpu", "onnx-cuda"]
+    assert [spec.use_gpu for spec in specs] == [False, True]
+    assert [spec.required_provider for spec in specs] == [
+        None,
+        "CUDAExecutionProvider",
+    ]
+
+
+def test_validate_onnx_baseline_provider_rejects_missing_cuda() -> None:
+    """CUDA baseline runs fail loudly instead of silently falling back to CPU."""
+
+    spec = _parse_onnx_baseline_specs(Namespace(onnx_baseline=["cuda"]))[0]
+    engine = Namespace(onnx_providers=[("CPUExecutionProvider", {})])
+
+    with pytest.raises(RuntimeError, match="CUDAExecutionProvider"):
+        _validate_onnx_baseline_provider(
+            spec=spec,
+            active_providers=_provider_names(engine.onnx_providers),
+        )
+
+
+def test_provider_names_accepts_plain_and_configured_providers() -> None:
+    """Provider diagnostics keep only provider names in JSON metadata."""
+
+    names = _provider_names(
+        [
+            ("CUDAExecutionProvider", {"device_id": 0}),
+            "CPUExecutionProvider",
+        ]
+    )
+
+    assert names == ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
 
 def test_parse_ggml_backend_specs_expands_vulkan_precision_matrix(

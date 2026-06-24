@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -96,6 +97,13 @@ class _GgmlBackendSpec:
     expected_log_text: str | None
     require_style_bert_timings: bool
     transport: str = "sidecar-http"
+
+
+@dataclass(frozen=True)
+class _OnnxBaselineSpec:
+    name: str
+    use_gpu: bool
+    required_provider: str | None = None
 
 
 _BACKEND_TIMING_SUMMARY_FIELDS = (
@@ -927,6 +935,59 @@ def _parse_ggml_backend_specs(args: argparse.Namespace) -> list[_GgmlBackendSpec
     return specs
 
 
+def _parse_onnx_baseline_specs(args: argparse.Namespace) -> list[_OnnxBaselineSpec]:
+    baseline_names = args.onnx_baseline or ["cpu"]
+    specs: list[_OnnxBaselineSpec] = []
+    for baseline_name in baseline_names:
+        if baseline_name == "cpu":
+            specs.append(_OnnxBaselineSpec(name="onnx-cpu", use_gpu=False))
+        elif baseline_name == "cuda":
+            specs.append(
+                _OnnxBaselineSpec(
+                    name="onnx-cuda",
+                    use_gpu=True,
+                    required_provider="CUDAExecutionProvider",
+                )
+            )
+        else:
+            raise ValueError(f"Unsupported ONNX baseline: {baseline_name}")
+    return specs
+
+
+def _provider_names(
+    providers: list[str] | Sequence[str | tuple[str, dict[str, Any]]],
+) -> list[str]:
+    names: list[str] = []
+    for provider in providers:
+        if isinstance(provider, tuple):
+            names.append(provider[0])
+        else:
+            names.append(provider)
+    return names
+
+
+def _validate_onnx_baseline_provider(
+    *,
+    spec: _OnnxBaselineSpec,
+    active_providers: list[str],
+) -> None:
+    if spec.required_provider is None:
+        return
+    if spec.required_provider not in active_providers:
+        raise RuntimeError(
+            f"{spec.name} requires {spec.required_provider}, but active ONNX "
+            f"providers are: {active_providers}"
+        )
+
+
+def _loaded_onnx_model_providers(model: Any) -> list[str]:
+    session = getattr(model, "onnx_session", None)
+    get_providers = getattr(session, "get_providers", None)
+    if callable(get_providers):
+        return list(get_providers())
+    return []
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -946,6 +1007,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sidecar_log_path", type=Path)
     parser.add_argument("--ggml_model_name")
     parser.add_argument("--ggml_jp_bert_model_name")
+    parser.add_argument(
+        "--onnx_baseline",
+        action="append",
+        choices=["cpu", "cuda"],
+        help=(
+            "ONNX Runtime baseline to benchmark. Repeat to compare CPU and CUDA. "
+            "Default: cpu."
+        ),
+    )
     parser.add_argument(
         "--ggml_backend",
         action="append",
@@ -1050,7 +1120,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    """Run the local ONNX CPU vs ggml/Vulkan benchmark."""
+    """Run local ONNX Runtime baselines vs ggml/Vulkan benchmarks."""
 
     args = _parse_args()
     texts = args.texts if args.texts is not None else _DEFAULT_TEXTS
@@ -1062,9 +1132,11 @@ def main() -> None:
     tmp_path.mkdir(parents=True, exist_ok=True)
 
     sidecar_log_path = args.sidecar_log_path or tmp_path / "tts-cpp-sidecar.log"
-    onnx_engine: StyleBertVITS2TTSEngine | None = None
+    query_engine: StyleBertVITS2TTSEngine | None = None
+    onnx_engines: list[StyleBertVITS2TTSEngine] = []
     ggml_engines: list[StyleBertVITS2TTSEngine] = []
     try:
+        onnx_baseline_specs = _parse_onnx_baseline_specs(args)
         ggml_backend_specs = _parse_ggml_backend_specs(args)
         models_dir, model_uuid = _prepare_models_dir(
             tmp_path=tmp_path,
@@ -1073,7 +1145,7 @@ def main() -> None:
         )
         aivm_manager = _build_aivm_manager(tmp_path=tmp_path, models_dir=models_dir)
 
-        onnx_engine = StyleBertVITS2TTSEngine(
+        query_engine = StyleBertVITS2TTSEngine(
             aivm_manager,
             use_gpu=False,
             load_all_models=False,
@@ -1087,21 +1159,46 @@ def main() -> None:
             max_styles=args.max_styles,
         )
         query_specs = _build_query_specs(
-            engine=onnx_engine,
+            engine=query_engine,
             texts=texts,
             style_ids=style_ids,
             tempo_dynamics_scale=args.tempo_dynamics_scale,
         )
-        onnx_engine.load_model(model_uuid)
-        onnx_records = _run_backend(
-            backend_name="onnx-cpu",
-            engine=onnx_engine,
-            query_specs=query_specs,
-            warmup_runs=args.warmup_runs,
-            measured_runs=args.runs,
-        )
+        query_engine.close()
+        query_engine = None
 
-        records = [*onnx_records]
+        records: list[_BenchmarkRecord] = []
+        onnx_provider_diagnostics: dict[str, Any] = {}
+        for onnx_baseline_spec in onnx_baseline_specs:
+            onnx_engine = StyleBertVITS2TTSEngine(
+                aivm_manager,
+                use_gpu=onnx_baseline_spec.use_gpu,
+                load_all_models=False,
+                bert_model_cache_dir=args.bert_cache_dir,
+                tts_backend="onnx",
+            )
+            onnx_engines.append(onnx_engine)
+            configured_providers = _provider_names(onnx_engine.onnx_providers)
+            onnx_model = onnx_engine.load_model(model_uuid)
+            actual_providers = _loaded_onnx_model_providers(onnx_model)
+            _validate_onnx_baseline_provider(
+                spec=onnx_baseline_spec,
+                active_providers=actual_providers,
+            )
+            onnx_provider_diagnostics[onnx_baseline_spec.name] = {
+                "available_providers": onnx_engine.available_onnx_providers,
+                "configured_providers": configured_providers,
+                "active_providers": actual_providers,
+            }
+            records.extend(
+                _run_backend(
+                    backend_name=onnx_baseline_spec.name,
+                    engine=onnx_engine,
+                    query_specs=query_specs,
+                    warmup_runs=args.warmup_runs,
+                    measured_runs=args.runs,
+                )
+            )
         sidecar_diagnostics: dict[str, dict[str, Any]] = {}
         for ggml_backend_spec in ggml_backend_specs:
             backend_log_path = sidecar_log_path.with_name(
@@ -1247,6 +1344,11 @@ def main() -> None:
                 "ggml_backends": [
                     ggml_backend_spec.name for ggml_backend_spec in ggml_backend_specs
                 ],
+                "onnx_baselines": [
+                    onnx_baseline_spec.name
+                    for onnx_baseline_spec in onnx_baseline_specs
+                ],
+                "onnx_provider_diagnostics": onnx_provider_diagnostics,
                 "ggml_backend_matrix": [
                     {
                         "name": ggml_backend_spec.name,
@@ -1282,8 +1384,8 @@ def main() -> None:
         }
         output = json.dumps(result, ensure_ascii=False, indent=2)
         if args.output_json is not None:
-                args.output_json.parent.mkdir(parents=True, exist_ok=True)
-                args.output_json.write_text(output + "\n", encoding="utf-8")
+            args.output_json.parent.mkdir(parents=True, exist_ok=True)
+            args.output_json.write_text(output + "\n", encoding="utf-8")
         print(output)
         if len(performance_gates["violations"]) > 0:
             raise SystemExit(
@@ -1291,10 +1393,12 @@ def main() -> None:
                 + "\n- ".join(performance_gates["violations"])
             )
     finally:
+        if query_engine is not None:
+            query_engine.close()
+        for onnx_engine in onnx_engines:
+            onnx_engine.close()
         for ggml_engine in ggml_engines:
             ggml_engine.close()
-        if onnx_engine is not None:
-            onnx_engine.close()
         if work_dir_context is not None and args.keep_work_dir is False:
             work_dir_context.cleanup()
 
