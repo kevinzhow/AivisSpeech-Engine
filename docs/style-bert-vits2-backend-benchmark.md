@@ -225,16 +225,19 @@ the same peak-normalization rule and then skip the engine-level threshold trim
 for served `ggml-*` backends. ONNX keeps the existing trim behavior.
 
 Post-fix cold parity probe on the AMD 780M, native binding, `tts-cpp-jp-bert`,
-`synthesize-front`, one run per text:
+`synthesize-front`, one run per text. This table intentionally omits RTF:
+the probe used `cold_smoke` (`--warmup_runs 0 --runs 1`) and exists only to
+validate output shape, level, and preview audio. Use the `Linux Vulkan Results`
+section above for comparable `warm_steady_state` RTF numbers.
 
-| text length | backend | output samples | duration sec | peak abs | RTF |
-| --- | --- | ---: | ---: | ---: | ---: |
-| short | ONNX CPU | `45567` | `1.033265` | `0.999969482` | `0.381` |
-| short | ggml Vulkan AMD 780M | `45568` | `1.033288` | `0.999969482` | `0.271` |
-| medium | ONNX CPU | `76288` | `1.729887` | `0.999969482` | `0.319` |
-| medium | ggml Vulkan AMD 780M | `76288` | `1.729887` | `0.999969482` | `0.173` |
-| long | ONNX CPU | `336384` | `7.627755` | `0.999969482` | `0.174` |
-| long | ggml Vulkan AMD 780M | `336384` | `7.627755` | `0.999969482` | `0.128` |
+| text length | backend | output samples | duration sec | peak abs |
+| --- | --- | ---: | ---: | ---: |
+| short | ONNX CPU | `45567` | `1.033265` | `0.999969482` |
+| short | ggml Vulkan AMD 780M | `45568` | `1.033288` | `0.999969482` |
+| medium | ONNX CPU | `76288` | `1.729887` | `0.999969482` |
+| medium | ggml Vulkan AMD 780M | `76288` | `1.729887` | `0.999969482` |
+| long | ONNX CPU | `336384` | `7.627755` | `0.999969482` |
+| long | ggml Vulkan AMD 780M | `336384` | `7.627755` | `0.999969482` |
 
 The short one-sample difference is one output sample at 44.1 kHz. The medium and
 long sample counts match exactly. A follow-up long-text three-run probe with the
