@@ -64,10 +64,10 @@ runtime libraries are missing.
 
 | text length | ONNX CPU RTF | ONNX CUDA RTF | ggml Vulkan AMD 780M RTF | ggml Vulkan RTX 3060 RTF |
 | --- | ---: | ---: | ---: | ---: |
-| short | `0.318` | `0.278` | `0.251` | `0.146` |
-| medium | `0.287` | `0.177` | `0.197` | `0.102` |
-| long | `0.208` | `0.067` | `0.136` | `0.063` |
-| overall mean | `0.271` | `0.174` | `0.195` | `0.104` |
+| short | `0.350` | `0.267` | `0.222` | `0.147` |
+| medium | `0.289` | `0.184` | `0.182` | `0.102` |
+| long | `0.209` | `0.065` | `0.131` | `0.063` |
+| overall mean | `0.283` | `0.172` | `0.178` | `0.104` |
 
 Interpretation:
 
@@ -81,19 +81,55 @@ Interpretation:
 
 This 2026-06-25 rerun pulled AivisSpeech-Engine to `1e079d9`, pulled TTS.cpp to
 `f389a96`, updated the TTS.cpp `ggml` submodule to `a9b84478`, and rebuilt both
-the native shared library and Vulkan `tts-server`. The table uses
-`/tmp/aivis-style-bert-vits2-benchmark-20260625/amd780m.json` for
+the native shared library and Vulkan `tts-server`. The RTF table is from
+no-audio benchmark runs so that AAC encoding does not perturb the AMD APU's
+CPU/iGPU shared power and memory budget. It uses
+`/tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/amd780m.json` for
 the ONNX CPU, ONNX CUDA, and AMD 780M ggml columns, and
-`/tmp/aivis-style-bert-vits2-benchmark-20260625/rtx3060.json` for the RTX 3060
-ggml column. The RTX 3060 run also repeated the ONNX baselines; those values are
-stored in the JSON artifact and were close to the AMD-run baseline values.
+`/tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/rtx3060.json` for
+the RTX 3060 ggml column. The RTX 3060 run also repeated the ONNX baselines;
+those values are stored in the JSON artifact and were close to the AMD-run
+baseline values.
+
+An earlier same-day run generated AAC after every measured sample and made the
+AMD 780M ggml/Vulkan column look slower (`0.195` overall). A no-audio control
+run on the same checkout produced `0.178` overall, while TTS.cpp native synthesis
+time stayed essentially unchanged. The apparent regression came from
+interleaved ffmpeg AAC encoding disturbing the APU benchmark, not from the Vulkan
+synthesis path. The benchmark harness now queues AAC artifacts and encodes them
+after a backend's measured synthesis loop.
 
 ## Linux Vulkan Audio Preview
 
-Each preview is the `run00` AAC artifact for that backend and text. The full
-benchmark generated three measured AAC runs per backend/text; `--audio_output_dir`
-records each generated path in `records[].audio_path`. AAC encoding runs after
-the synthesis timer, so it is not included in RTF.
+Each preview is the `run00` AAC artifact for that backend and text. These
+previews are for qualitative listening only; the RTF table above comes from the
+no-audio runs. `--audio_output_dir` records each generated path in
+`records[].audio_path`, and AAC encoding runs outside the synthesis timer.
+
+GitHub's normal `github.com/.../blob/...md` Markdown preview sanitizes raw
+`<audio>` tags, so that view shows the fallback `AAC` links only. To get inline
+players instead of file/download pages, serve this document through GitHub Pages:
+
+1. In repository settings, open `Pages`.
+2. Set `Build and deployment` to `Deploy from a branch`.
+3. Select branch `master` and folder `/docs`.
+4. Open `https://kevinzhow.github.io/AivisSpeech-Engine/style-bert-vits2-backend-benchmark.html`.
+
+Equivalent GitHub CLI command when Pages is not enabled yet:
+
+```bash
+gh api \
+  --method POST \
+  repos/kevinzhow/AivisSpeech-Engine/pages \
+  -f build_type=legacy \
+  -f 'source[branch]=master' \
+  -f 'source[path]=/docs'
+```
+
+There is no repository setting that enables `<audio>` inside ordinary GitHub
+repo Markdown previews; GitHub Pages is the path that preserves the HTML audio
+controls. Do not add `.nojekyll` to `/docs` for this path, because Pages should
+let Jekyll render the Markdown file into an HTML page.
 
 | text length | ONNX CPU | ONNX CUDA | ggml Vulkan AMD 780M | ggml Vulkan RTX 3060 |
 | --- | --- | --- | --- | --- |
@@ -285,7 +321,7 @@ If the GGUF needs to be rebuilt from source, use TTS.cpp's
 `py-gguf/convert_style_bert_vits2_to_gguf` or the Engine's `AivmGgufCache`.
 For normal benchmark reproduction, use the preconverted HF artifacts above.
 
-AMD 780M iGPU run:
+AMD 780M iGPU RTF run:
 
 ```bash
 LD_LIBRARY_PATH="${CUDA12_NVIDIA_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
@@ -309,12 +345,11 @@ uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --text 'これは少し長めの文章です。GPUバックエンドの推論速度と音声品質を確認しています。' \
   --warmup_runs 1 \
   --runs 3 \
-  --audio_output_dir /tmp/aivis-style-bert-vits2-benchmark-20260625/amd780m-audio \
-  --output_json /tmp/aivis-style-bert-vits2-benchmark-20260625/amd780m.json \
-  > /tmp/aivis-style-bert-vits2-benchmark-20260625/amd780m.log 2>&1
+  --output_json /tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/amd780m.json \
+  > /tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/amd780m.log 2>&1
 ```
 
-RTX 3060 Vulkan run:
+RTX 3060 Vulkan RTF run:
 
 ```bash
 LD_LIBRARY_PATH="${CUDA12_NVIDIA_LIBS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" \
@@ -338,9 +373,18 @@ uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --text 'これは少し長めの文章です。GPUバックエンドの推論速度と音声品質を確認しています。' \
   --warmup_runs 1 \
   --runs 3 \
-  --audio_output_dir /tmp/aivis-style-bert-vits2-benchmark-20260625/rtx3060-audio \
-  --output_json /tmp/aivis-style-bert-vits2-benchmark-20260625/rtx3060.json \
-  > /tmp/aivis-style-bert-vits2-benchmark-20260625/rtx3060.log 2>&1
+  --output_json /tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/rtx3060.json \
+  > /tmp/aivis-style-bert-vits2-benchmark-20260625-noaudio-final/rtx3060.log 2>&1
+```
+
+To regenerate the qualitative audio previews for GitHub Pages, run the same
+command with `--audio_output_dir` and use a separate JSON output path. The
+benchmark harness writes AAC files after each backend's measured synthesis loop,
+but the publication RTF table should still come from the no-audio command above:
+
+```text
+--audio_output_dir /tmp/aivis-style-bert-vits2-benchmark-20260625/audio-preview
+--output_json /tmp/aivis-style-bert-vits2-benchmark-20260625/audio-preview.json
 ```
 
 macOS Metal local run:

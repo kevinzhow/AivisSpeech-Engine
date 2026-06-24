@@ -2,7 +2,9 @@
 
 from argparse import Namespace
 from pathlib import Path
+from typing import cast
 
+import numpy as np
 import pytest
 
 from tools.benchmark_style_bert_vits2_ggml_vulkan import (
@@ -17,11 +19,17 @@ from tools.benchmark_style_bert_vits2_ggml_vulkan import (
     _parse_ggml_backend_specs,
     _parse_onnx_baseline_specs,
     _provider_names,
+    _QuerySpec,
     _read_sidecar_diagnostics,
     _rtf_ratios_vs_backend,
+    _run_backend,
     _summarize_backend_timings_by_text,
     _summarize_by_text,
     _validate_onnx_baseline_provider,
+)
+from voicevox_engine.model import AudioQuery
+from voicevox_engine.tts_pipeline.style_bert_vits2_tts_engine import (
+    StyleBertVITS2TTSEngine,
 )
 
 
@@ -106,6 +114,64 @@ def test_audio_artifact_path_is_stable_for_benchmark_records(
     assert audio_path == (
         tmp_path / "ggml-vulkan-jp-bert-native_style1_text02_run03.m4a"
     )
+
+
+def test_run_backend_defers_aac_encoding_until_after_measured_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preview encoding should not run between timed synthesis samples."""
+
+    events: list[str] = []
+
+    class DummyEngine:
+        def synthesize_wave(
+            self,
+            audio_query: AudioQuery,
+            style_id: int,
+            *,
+            enable_interrogative_upspeak: bool,
+        ) -> np.ndarray:
+            assert enable_interrogative_upspeak is True
+            events.append(f"synth:{style_id}")
+            return np.zeros(4410, dtype=np.float32)
+
+    def fake_write_aac_audio_artifact(
+        *,
+        output_path: Path,
+        audio: np.ndarray,
+        sample_rate: int,
+    ) -> None:
+        assert sample_rate == 44100
+        assert audio.shape == (4410,)
+        events.append(f"write:{output_path.name}")
+
+    monkeypatch.setattr(
+        "tools.benchmark_style_bert_vits2_ggml_vulkan._write_aac_audio_artifact",
+        fake_write_aac_audio_artifact,
+    )
+
+    _run_backend(
+        backend_name="ggml-vulkan-jp-bert-native",
+        engine=cast(StyleBertVITS2TTSEngine, DummyEngine()),
+        query_specs=[
+            _QuerySpec(
+                text="テストです。",
+                style_id=1,
+                audio_query=cast(AudioQuery, object()),
+            )
+        ],
+        warmup_runs=0,
+        measured_runs=2,
+        audio_output_dir=tmp_path,
+    )
+
+    assert events == [
+        "synth:1",
+        "synth:1",
+        "write:ggml-vulkan-jp-bert-native_style1_text00_run00.m4a",
+        "write:ggml-vulkan-jp-bert-native_style1_text00_run01.m4a",
+    ]
 
 
 def test_summarize_backend_timings_by_text_reports_payload_overhead() -> None:

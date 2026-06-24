@@ -373,6 +373,7 @@ def _run_backend(
             )
 
     records: list[_BenchmarkRecord] = []
+    audio_artifacts: list[tuple[Path, np.ndarray]] = []
     for run_index in range(measured_runs):
         for text_index, query_spec in enumerate(query_specs):
             start_time = time.perf_counter()
@@ -393,11 +394,7 @@ def _run_backend(
                     style_id=query_spec.style_id,
                     run_index=run_index,
                 )
-                _write_aac_audio_artifact(
-                    output_path=audio_path,
-                    audio=wave,
-                    sample_rate=44100,
-                )
+                audio_artifacts.append((audio_path, np.array(wave, copy=True)))
             records.append(
                 _BenchmarkRecord(
                     backend=backend_name,
@@ -417,6 +414,12 @@ def _run_backend(
                     audio_path=str(audio_path) if audio_path is not None else None,
                 )
             )
+    for audio_path, wave in audio_artifacts:
+        _write_aac_audio_artifact(
+            output_path=audio_path,
+            audio=wave,
+            sample_rate=44100,
+        )
     return records
 
 
