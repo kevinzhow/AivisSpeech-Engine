@@ -2,8 +2,8 @@
 
 This benchmark compares the current AivisSpeech Style-Bert-VITS2 path across
 ONNX Runtime CPU, ONNX Runtime CUDA, and TTS.cpp ggml/Vulkan on both the local
-AMD iGPU and NVIDIA dGPU. RTF is `elapsed_seconds / output_duration_seconds`;
-lower is better.
+AMD iGPU and NVIDIA dGPU. It also records a Windows Intel Arc B580 sidecar run.
+RTF is `elapsed_seconds / output_duration_seconds`; lower is better.
 
 ## Scope
 
@@ -80,6 +80,47 @@ the ONNX CPU, ONNX CUDA, and AMD 780M ggml columns, and
 `/tmp/aivis-style-bert-vits2-benchmark-rtx3060-final.json` for the RTX 3060
 ggml column. The RTX 3060 run also repeated the ONNX baselines; those values are
 stored in the JSON artifact and were close to the AMD-run baseline values.
+
+## Windows Intel Arc B580 Sidecar Result
+
+This run was captured on 2026-06-25, Asia/Tokyo, on Windows 11 with an
+Intel(R) Arc(TM) B580 Graphics device using driver `32.0.101.8826`. The local
+TTS.cpp build had `tts-server.exe` but did not have a native shared library
+(`tts.dll`), so this result uses the managed sidecar HTTP transport rather than
+the native TTS.cpp C API used in the Linux table above. It is useful as local
+device evidence and a sidecar-path benchmark, but should not be mixed directly
+with the native-binding rows.
+
+The run used `--warmup_runs 1 --runs 3`, `tts-cpp-jp-bert`,
+`synthesize-front`, `accurate` Vulkan precision, and the default base64 BERT
+payload format. The JSON artifact is:
+
+```text
+C:\Users\kevin\run-logs\aivis-style-bert-vits2-b580-sidecar-warm.json
+```
+
+The captured TTS.cpp device evidence was:
+
+```text
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = Intel(R) Arc(TM) B580 Graphics (Intel Corporation) | uma: 0 | fp16: 0 | bf16: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: none
+```
+
+| text length | chars | ONNX CPU RTF | ggml Vulkan Intel Arc B580 sidecar RTF | ggml/ONNX CPU RTF ratio |
+| --- | ---: | ---: | ---: | ---: |
+| short | 6 | `0.444` | `0.184` | `0.414` |
+| medium | 10 | `0.377` | `0.156` | `0.413` |
+| long | 41 | `0.276` | `0.069` | `0.251` |
+| overall mean | - | `0.366` | `0.136` | `0.373` |
+
+Interpretation:
+
+- The Windows Intel Arc B580 sidecar path is active and faster than ONNX CPU in
+  this run, with overall ggml/Vulkan RTF at `37.3%` of ONNX CPU.
+- Short text remains more overhead-sensitive than long text. The long text
+  amortizes sidecar and payload overhead best, reaching `0.069` RTF.
+- Because this run uses sidecar HTTP transport, the numbers include local JSON,
+  base64 BERT payload, WAV decode, and sidecar request overhead.
 
 ## Reproduction
 
