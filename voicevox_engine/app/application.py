@@ -1,5 +1,7 @@
 """ASGI application の生成"""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -63,11 +65,27 @@ def generate_app(
         disable_mutable_api
     )
 
+    def shutdown_tts_engines() -> None:
+        """Release resources owned by TTS engines."""
+
+        for engine in tts_engines.engines():
+            close = getattr(engine, "close", None)
+            if callable(close):
+                close()
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            shutdown_tts_engines()
+
     app = FastAPI(
         title=engine_manifest.name,
         description=f"{engine_manifest.brand_name} の音声合成エンジンです。",
         version=__version__,
         separate_input_output_schemas=False,  # Pydantic V1 のときのスキーマに合わせるため
+        lifespan=lifespan,
     )
     app = configure_middlewares(app, cors_policy_mode, allow_origin)
     app = configure_global_exception_handlers(app)

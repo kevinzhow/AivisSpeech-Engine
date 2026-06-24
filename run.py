@@ -209,6 +209,24 @@ class _CLIArgs:
     host: str | None
     port: int | None
     use_gpu: bool | None
+    tts_backend: str
+    ggml_vulkan_server_url: str
+    ggml_vulkan_model: str | None
+    ggml_jp_bert_model: str | None
+    ggml_vulkan_strict: bool
+    ggml_model_cache_dir: Path | None
+    ggml_converter_path: Path | None
+    ggml_converter_device: str
+    ggml_tts_server_path: Path | None
+    ggml_tts_server_backend: str
+    ggml_model_path: Path | None
+    ggml_vulkan_device: str | None
+    ggml_vulkan_precision: str
+    ggml_vulkan_allow_nonzero_sdp: bool
+    ggml_synthesis_endpoint: str
+    ggml_bert_payload_format: str
+    ggml_tts_server_debug_timings: bool
+    ggml_tts_server_log_path: Path | None
     load_all_models: bool
     output_log_utf8: bool
     cors_policy_mode: CorsPolicyMode | None
@@ -252,6 +270,151 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
         help=(
             "GPUを使って音声合成するか設定します。指定しない場合、代わりに環境変数 VV_USE_GPU の値が使われます。"
             "VV_USE_GPU の値が1の場合はGPUを使用し、0または空文字、値がない場合は使用されません。"
+        ),
+    )
+    parser.add_argument(
+        "--tts_backend",
+        choices=["onnx", "ggml-vulkan"],
+        default="onnx",
+        help=(
+            "音声合成に使う TTS バックエンドです。"
+            "onnx は既存の ONNX Runtime バックエンド、ggml-vulkan は実験的な ggml/Vulkan バックエンドです。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_vulkan_server_url",
+        default="http://127.0.0.1:8080",
+        help="ggml-vulkan バックエンドで利用する TTS.cpp サイドカーの URL です。",
+    )
+    parser.add_argument(
+        "--ggml_vulkan_model",
+        default=None,
+        help=(
+            "TTS.cpp サイドカーにロード済みのモデル名です。"
+            "指定しない場合は TTS.cpp 側のデフォルトモデルを利用します。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_jp_bert_model",
+        default=None,
+        help=(
+            "TTS.cpp サイドカーにロード済みの Style-Bert-VITS2 JP-BERT モデル名です。"
+            "指定した場合、日本語 BERT 特徴量抽出に TTS.cpp の /jp-bert/features を利用します。"
+            "managed sidecar で利用する場合は --ggml_model_path に合成 GGUF と JP-BERT GGUF を含むディレクトリを指定してください。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_vulkan_strict",
+        action="store_true",
+        help=(
+            "ggml-vulkan バックエンドの初期化・推論に失敗した場合に ONNX へフォールバックせずエラーにします。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_model_cache_dir",
+        type=Path,
+        default=None,
+        help=(
+            "AIVM/Safetensors から変換した GGUF モデルのキャッシュディレクトリです。"
+            "指定しない場合はユーザーデータディレクトリ配下の GgufModelCaches を利用します。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_converter_path",
+        type=Path,
+        default=None,
+        help=(
+            "AIVM/Safetensors を GGUF に変換する TTS.cpp converter 実行ファイルのパスです。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_converter_device",
+        default="cpu",
+        help="GGUF converter が PyTorch 参照モデルをロードするデバイスです。",
+    )
+    parser.add_argument(
+        "--ggml_tts_server_path",
+        type=Path,
+        default=None,
+        help=(
+            "managed sidecar として起動する TTS.cpp tts-server 実行ファイルのパスです。"
+            "指定しない場合は既存の --ggml_vulkan_server_url に接続します。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_tts_server_backend",
+        choices=["vulkan", "cpu"],
+        default="vulkan",
+        help=(
+            "managed sidecar として起動する TTS.cpp tts-server の backend です。"
+            "通常は vulkan を指定します。cpu は ggml CPU との性能比較用です。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_model_path",
+        type=Path,
+        default=None,
+        help=(
+            "managed sidecar で利用する事前変換済み GGUF ファイルまたは GGUF ディレクトリです。"
+            "AIVM/Safetensors からの cache 変換結果がある場合はそちらが優先されます。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_vulkan_device",
+        default=None,
+        help="TTS.cpp sidecar に渡す TTS_DEVICE の値です。",
+    )
+    parser.add_argument(
+        "--ggml_vulkan_precision",
+        choices=["accurate", "fast"],
+        default="accurate",
+        help=(
+            "Style-Bert-VITS2 の TTS.cpp Vulkan 精度モードです。"
+            "accurate は F16/coopmat を無効化する既定値、fast は診断用の高速設定です。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_vulkan_allow_nonzero_sdp",
+        action="store_true",
+        help=(
+            "検証用に ggml-vulkan バックエンドで非ゼロ sdp_ratio を許可します。"
+            "既定では ONNX フォールバック対象です。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_synthesis_endpoint",
+        choices=["synthesize-front", "synthesize-symbols"],
+        default="synthesize-front",
+        help=(
+            "ggml-vulkan バックエンドが利用する TTS.cpp Style-Bert-VITS2 合成 endpoint です。"
+            "synthesize-front は ID 化済み入力、synthesize-symbols は TTS.cpp 側で phone/tone ID 化します。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_bert_payload_format",
+        choices=["base64", "json-array"],
+        default="base64",
+        help=(
+            "ggml-vulkan バックエンドが TTS.cpp に送る BERT tensor の JSON 表現です。"
+            "base64 は TTS.cpp の bert_b64 入力を使い、巨大な float 配列 JSON を避けます。"
+            "json-array は旧形式互換用です。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_tts_server_debug_timings",
+        action="store_true",
+        help=(
+            "managed sidecar の TTS.cpp Style-Bert-VITS2 graph timing ログを有効化します。"
+            "性能診断用です。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_tts_server_log_path",
+        type=Path,
+        default=None,
+        help=(
+            "managed sidecar として起動した TTS.cpp tts-server のログ保存先です。"
+            "指定しない場合はユーザーデータディレクトリ配下の tts-cpp-sidecar.log を利用します。"
         ),
     )
     # parser.add_argument(
@@ -460,7 +623,29 @@ def main() -> None:
         # AivisSpeech Engine 独自の StyleBertVITS2TTSEngine を通常の TTSEngine の代わりに利用
         tts_engines = TTSEngineManager()
         tts_engines.register_engine(
-            StyleBertVITS2TTSEngine(aivm_manager, use_gpu, args.load_all_models),
+            StyleBertVITS2TTSEngine(
+                aivm_manager,
+                use_gpu,
+                args.load_all_models,
+                tts_backend=args.tts_backend,
+                ggml_vulkan_server_url=args.ggml_vulkan_server_url,
+                ggml_vulkan_model=args.ggml_vulkan_model,
+                ggml_jp_bert_model=args.ggml_jp_bert_model,
+                ggml_vulkan_strict=args.ggml_vulkan_strict,
+                ggml_model_cache_dir=args.ggml_model_cache_dir,
+                ggml_converter_path=args.ggml_converter_path,
+                ggml_converter_device=args.ggml_converter_device,
+                ggml_tts_server_path=args.ggml_tts_server_path,
+                ggml_tts_server_backend=args.ggml_tts_server_backend,
+                ggml_model_path=args.ggml_model_path,
+                ggml_vulkan_device=args.ggml_vulkan_device,
+                ggml_vulkan_precision=args.ggml_vulkan_precision,
+                ggml_vulkan_allow_nonzero_sdp=args.ggml_vulkan_allow_nonzero_sdp,
+                ggml_synthesis_endpoint=args.ggml_synthesis_endpoint,
+                ggml_bert_payload_format=args.ggml_bert_payload_format,
+                ggml_tts_server_debug_timings=args.ggml_tts_server_debug_timings,
+                ggml_tts_server_log_path=args.ggml_tts_server_log_path,
+            ),
             MOCK_CORE_VERSION,
         )
 

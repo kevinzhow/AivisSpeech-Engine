@@ -14,6 +14,7 @@ from aivmlib.schemas.aivm_manifest import AivmMetadata, ModelArchitecture
 from pydantic import BaseModel, TypeAdapter
 from semver.version import Version
 
+from voicevox_engine.aivm_metadata import read_aivm_metadata_from_path
 from voicevox_engine.library.model import LibrarySpeaker
 from voicevox_engine.logging import logger
 from voicevox_engine.metas.metas import (
@@ -107,7 +108,7 @@ class AivmInfosRepository:
                 if self._is_background_scan_enabled is False:
                     return
                 # BERT モデルのロードと並行させるため、少し待ってから実行
-                ## aivmlib.read_aivmx_metadata() はモデルファイルをロードする関係で若干 CPU-bound だが、
+                ## AIVM メタデータ読み込みはモデルファイルをロードする関係で若干 CPU-bound だが、
                 ## Python は GIL の制約により、CPU-bound な処理はマルチスレッドでもほとんど並列化できない
                 ## そこで StyleBertVITS2TTSEngine 初期化時の BERT モデルのロードが GIL 外のネイティブコードで行われるのを活用し、
                 ## GIL の制約を受けない BERT モデルのロードと並行させ、エンジン起動時間を短縮している
@@ -165,8 +166,14 @@ class AivmInfosRepository:
             # この時点で確実にインストール済み音声合成モデルの情報が存在しているべき
             assert self._installed_aivm_infos is not None
 
-            # 当該モデルが既に存在する場合（つまりモデル更新時）、既存のロード状態を引き継ぐ
             manifest_uuid = str(aivm_metadata.manifest.uuid)
+            aivm_metadata, aivm_file_path = self._prefer_aivm_primary_file(
+                aivm_metadata=aivm_metadata,
+                aivm_file_path=aivm_file_path,
+                aivm_model_uuid=manifest_uuid,
+            )
+
+            # 当該モデルが既に存在する場合（つまりモデル更新時）、既存のロード状態を引き継ぐ
             existing_info = self._installed_aivm_infos.get(manifest_uuid)
             is_loaded = existing_info.is_loaded if existing_info is not None else False
 
@@ -208,6 +215,57 @@ class AivmInfosRepository:
 
             # 現在保持している情報をキャッシュに反映
             self._persist_to_cache()
+
+    def _prefer_aivm_primary_file(
+        self,
+        *,
+        aivm_metadata: AivmMetadata,
+        aivm_file_path: Path,
+        aivm_model_uuid: str,
+    ) -> tuple[AivmMetadata, Path]:
+        """Prefer same-UUID AIVM/Safetensors as the registered primary file."""
+
+        assert self._installed_aivm_infos is not None
+
+        if aivm_file_path.suffix == ".aivm":
+            return aivm_metadata, aivm_file_path
+
+        aivm_primary_candidates: list[Path] = []
+        existing_info = self._installed_aivm_infos.get(aivm_model_uuid)
+        if (
+            existing_info is not None
+            and existing_info.file_path.suffix == ".aivm"
+            and existing_info.file_path.exists()
+            and existing_info.file_path.is_file()
+        ):
+            aivm_primary_candidates.append(existing_info.file_path)
+        aivm_primary_candidates.append(
+            aivm_file_path.with_name(f"{aivm_model_uuid}.aivm")
+        )
+
+        for aivm_primary_path in aivm_primary_candidates:
+            if not aivm_primary_path.exists() or not aivm_primary_path.is_file():
+                continue
+            try:
+                aivm_primary_metadata, container_format = read_aivm_metadata_from_path(
+                    aivm_primary_path
+                )
+            except aivmlib.AivmValidationError as ex:
+                logger.warning(
+                    f"{aivm_primary_path}: Failed to read preferred AIVM/Safetensors metadata.",
+                    exc_info=ex,
+                )
+                continue
+            if container_format != "aivm":
+                continue
+            if str(aivm_primary_metadata.manifest.uuid) != aivm_model_uuid:
+                logger.warning(
+                    f"{aivm_primary_path}: Manifest UUID does not match {aivm_model_uuid}. Skipping preferred AIVM/Safetensors file."
+                )
+                continue
+            return aivm_primary_metadata, aivm_primary_path
+
+        return aivm_metadata, aivm_file_path
 
     def mark_default_models(self, default_model_uuids: list[uuid.UUID]) -> None:
         """
@@ -485,13 +543,13 @@ class AivmInfosRepository:
 
     def _scan_models(self, installed_models_dir: Path) -> dict[str, AivmInfo]:
         """
-        指定されたディレクトリに保存されている *.aivmx ファイルを走査し、すべての音声合成モデルの情報を取得する。
+        指定されたディレクトリに保存されている *.aivm / *.aivmx ファイルを走査し、すべての音声合成モデルの情報を取得する。
         このメソッドはソートを行わないので、呼び出し元の責任でソートを行う必要がある。
 
         Parameters
         ----------
         installed_models_dir : Path
-            AIVMX ファイルのインストール先ディレクトリ
+            AIVM / AIVMX ファイルのインストール先ディレクトリ
 
         Returns
         -------
@@ -502,10 +560,15 @@ class AivmInfosRepository:
         logger.info("Scanning installed models ...")
         start_time = time.time()
 
-        # AIVMX ファイルのインストール先ディレクトリ内に配置されている .aivmx ファイルのパスを取得
-        aivm_file_paths = glob.glob(str(installed_models_dir / "*.aivmx"))
+        # AIVM / AIVMX ファイルのインストール先ディレクトリ内に配置されているモデルファイルのパスを取得
+        ## 同一 UUID の .aivm / .aivmx が両方存在する場合、ggml backend の主入力になる AIVM/Safetensors を優先して登録する
+        ## ONNX backend は必要に応じて同じ UUID の .aivmx を別途探して互換入力にする
+        aivm_file_paths = [
+            *glob.glob(str(installed_models_dir / "*.aivm")),
+            *glob.glob(str(installed_models_dir / "*.aivmx")),
+        ]
 
-        # 各 AIVMX ファイルごとに
+        # 各 AIVM / AIVMX ファイルごとに
         aivm_infos: dict[str, AivmInfo] = {}
         for aivm_file_path_str in aivm_file_paths:
             # 最低限のパスのバリデーション
@@ -519,9 +582,8 @@ class AivmInfosRepository:
 
             # AIVM メタデータの読み込み
             try:
-                with open(aivm_file_path, mode="rb") as f:
-                    aivm_metadata = aivmlib.read_aivmx_metadata(f)
-                    aivm_manifest = aivm_metadata.manifest
+                aivm_metadata, _ = read_aivm_metadata_from_path(aivm_file_path)
+                aivm_manifest = aivm_metadata.manifest
             except aivmlib.AivmValidationError as ex:
                 logger.warning(
                     f"{aivm_file_path}: Failed to read AIVM metadata. Skipping...",
@@ -574,14 +636,14 @@ class AivmInfosRepository:
         is_default_model: bool,
     ) -> tuple[str, AivmInfo] | None:
         """
-        指定された AIVM メタデータと AIVMX ファイルのパスから AivmInfo を構築する。
+        指定された AIVM メタデータと AIVM / AIVMX ファイルのパスから AivmInfo を構築する。
 
         Parameters
         ----------
         aivm_metadata : AivmMetadata
             AIVM メタデータ
         aivm_file_path : Path
-            AIVMX ファイルのパス
+            AIVM / AIVMX ファイルのパス
         is_loaded : bool
             モデルがロードされているかどうか
         is_default_model : bool
@@ -641,9 +703,9 @@ class AivmInfosRepository:
             is_default_model=is_default_model,
             # 初期値として AIVM マニフェスト記載のバージョンを設定
             latest_version=aivm_manifest.version,
-            # AIVMX ファイルのインストール先パス
+            # AIVM / AIVMX ファイルのインストール先パス
             file_path=aivm_file_path,
-            # AIVMX ファイルのインストールサイズ (バイト単位)
+            # AIVM / AIVMX ファイルのインストールサイズ (バイト単位)
             file_size=aivm_file_path.stat().st_size,
             # AIVM マニフェスト
             manifest=aivm_manifest,

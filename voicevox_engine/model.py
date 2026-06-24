@@ -120,9 +120,9 @@ class AivmInfo(BaseModel):
     latest_version: str = Field(
         description="この音声合成モデルの AivisHub で公開されている最新バージョン (AivisHub で公開されていない場合は AIVM マニフェスト記載のバージョン)"
     )
-    file_path: Path = Field(description="AIVMX ファイルのインストール先パス")
+    file_path: Path = Field(description="AIVM / AIVMX ファイルのインストール先パス")
     file_size: int = Field(
-        description="AIVMX ファイルのインストールサイズ (バイト単位)"
+        description="AIVM / AIVMX ファイルのインストールサイズ (バイト単位)"
     )
     manifest: AivmManifest = Field(description="AIVM マニフェスト")
     speakers: list[LibrarySpeaker] = Field(

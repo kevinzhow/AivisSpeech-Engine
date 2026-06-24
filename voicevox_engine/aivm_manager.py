@@ -16,7 +16,12 @@ from aivmlib.schemas.aivm_manifest import (
 from fastapi import HTTPException
 from semver.version import Version
 
+from voicevox_engine.aivm_gguf_cache import AivmGgufCache
 from voicevox_engine.aivm_infos_repository import AivmInfosRepository
+from voicevox_engine.aivm_metadata import (
+    read_aivm_metadata,
+    read_aivm_metadata_from_path,
+)
 from voicevox_engine.logging import logger
 from voicevox_engine.metas.metas import Speaker, SpeakerInfo, StyleId
 from voicevox_engine.metas.metas_store import Character
@@ -33,7 +38,7 @@ class AivmManager:
     AIVM (Aivis Voice Model) 仕様に準拠した音声合成モデルと AIVM マニフェストを管理するクラス。
 
     VOICEVOX ENGINE における MetasStore の役割を代替する。(AivisSpeech Engine では MetasStore は無効化されている)
-    AivisSpeech はインストールサイズを削減するため、AIVMX ファイルにのみ対応している。
+    既存 ONNX backend は AIVMX ファイルを利用する。ggml バックエンドでは AIVM/Safetensors を主入力として利用する。
     ref: https://github.com/Aivis-Project/aivmlib#aivm-specification
     """
 
@@ -50,7 +55,7 @@ class AivmManager:
         Parameters
         ----------
         installed_models_dir : Path
-            AIVMX ファイルのインストール先ディレクトリ
+            AIVM / AIVMX ファイルのインストール先ディレクトリ
         aivishub_client : AivisHubClient | None
             AivisHub API クライアント。None の場合はデフォルトの AivisHubClient() が使われる。
         cache_file_path : Path | None
@@ -390,34 +395,43 @@ class AivmManager:
 
     def install_model(self, file: BinaryIO) -> None:
         """
-        AIVMX (Aivis Voice Model for ONNX) ファイル (`.aivmx`) をインストールする。
+        AIVM/Safetensors (`.aivm`) または AIVMX/ONNX (`.aivmx`) ファイルをインストールする。
 
         Parameters
         ----------
         file : BinaryIO
-            AIVMX ファイルのバイナリ
+            AIVM / AIVMX ファイルのバイナリ
         """
 
-        # AIVMX ファイルからから AIVM メタデータを取得
+        # AIVM / AIVMX ファイルから AIVM メタデータを取得
+        ## 既存 API 互換のため、拡張子が不明なアップロードでは AIVMX を優先して試す
         try:
-            aivm_metadata = aivmlib.read_aivmx_metadata(file)
+            aivm_metadata, container_format = read_aivm_metadata(
+                file,
+                preferred_format="aivmx",
+            )
             aivm_manifest = aivm_metadata.manifest
         except aivmlib.AivmValidationError as ex:
-            logger.error("AIVMX file is invalid:", exc_info=ex)
+            logger.error("AIVM file is invalid:", exc_info=ex)
             raise HTTPException(
                 status_code=422,
-                detail=f"指定された AIVMX ファイルの形式が正しくありません。({ex})",
+                detail=f"指定された AIVM / AIVMX ファイルの形式が正しくありません。({ex})",
             ) from ex
 
-        # すでに同一 UUID のファイルがインストール済みの場合、同じファイルを更新する
-        ## 手動で .aivmx ファイルをインストール先ディレクトリにコピーしていた (ファイル名が UUID と一致しない) 場合も更新できるよう、
-        ## この場合のみ特別に更新先ファイル名を現在保存されているファイル名に変更する
-        aivm_file_path = self.installed_models_dir / f"{aivm_manifest.uuid}.aivmx"
+        # すでに同一 UUID のファイルがインストール済みの場合、同じ形式なら同じファイルを更新する
+        ## 手動でモデルファイルをインストール先ディレクトリにコピーしていた (ファイル名が UUID と一致しない) 場合も更新できるよう、
+        ## 同一コンテナ形式の場合のみ特別に更新先ファイル名を現在保存されているファイル名に変更する
+        ## AIVMX -> AIVM のようにコンテナ形式が変わる場合は、TTS.cpp converter が拡張子を見てロード形式を判定するため canonical path に切り替える
+        aivm_file_path = (
+            self.installed_models_dir / f"{aivm_manifest.uuid}.{container_format}"
+        )
         aivm_infos = self.get_installed_aivm_infos()
         if str(aivm_manifest.uuid) in aivm_infos:
             logger.info(f"Model {aivm_manifest.uuid} is already installed. Updating...")
-            # aivm_file_path を現在保存されているファイル名に変更
-            aivm_file_path = aivm_infos[str(aivm_manifest.uuid)].file_path
+            installed_file_path = aivm_infos[str(aivm_manifest.uuid)].file_path
+            if installed_file_path.suffix == f".{container_format}":
+                # aivm_file_path を現在保存されているファイル名に変更
+                aivm_file_path = installed_file_path
 
         # マニフェストバージョンのバリデーション
         if (
@@ -449,27 +463,27 @@ class AivmManager:
         # ここでリセットしないとファイルの内容を読み込めない
         file.seek(0)
 
-        # AIVMX ファイルをインストール
+        # AIVM / AIVMX ファイルをインストール
         ## 通常は重複防止のため "(音声合成モデルの UUID).aivmx" のフォーマットのファイル名でインストールされるが、
         ## 手動で .aivmx ファイルをインストール先ディレクトリにコピーしても一通り動作するように考慮している
-        logger.info("Installing AIVMX file ...")
+        logger.info("Installing AIVM file ...")
         try:
             with open(aivm_file_path, mode="wb") as f:
                 f.write(file.read())
-            logger.info(f"Installed AIVMX file to {aivm_file_path}.")
+            logger.info(f"Installed AIVM file to {aivm_file_path}.")
         except OSError as ex:
             logger.error(
-                f"Failed to write AIVMX file to {aivm_file_path}:", exc_info=ex
+                f"Failed to write AIVM file to {aivm_file_path}:", exc_info=ex
             )
             error_message = str(ex).lower()
             if "no space" in error_message:
-                detail = f"AIVMX ファイルの書き込みに失敗しました。ストレージ容量が不足しています。({ex})"
+                detail = f"AIVM / AIVMX ファイルの書き込みに失敗しました。ストレージ容量が不足しています。({ex})"
             elif "permission denied" in error_message:
-                detail = f"AIVMX ファイルの書き込みに失敗しました。インストール先フォルダへのアクセス権限が不足しています。({ex})"
+                detail = f"AIVM / AIVMX ファイルの書き込みに失敗しました。インストール先フォルダへのアクセス権限が不足しています。({ex})"
             elif "read-only" in error_message:
-                detail = f"AIVMX ファイルの書き込みに失敗しました。インストール先フォルダが読み取り専用権限になっています。({ex})"
+                detail = f"AIVM / AIVMX ファイルの書き込みに失敗しました。インストール先フォルダが読み取り専用権限になっています。({ex})"
             else:
-                detail = f"AIVMX ファイルの書き込みに失敗しました。({ex})"
+                detail = f"AIVM / AIVMX ファイルの書き込みに失敗しました。({ex})"
             raise HTTPException(
                 status_code=500,
                 detail=detail,
@@ -477,6 +491,8 @@ class AivmManager:
 
         # リポジトリのメタデータを更新
         self._repository.upsert_model_from_metadata(aivm_metadata, aivm_file_path)
+        if container_format == "aivm":
+            self._delete_default_gguf_cache_entries(str(aivm_manifest.uuid))
 
     def install_model_from_url(self, download_url: str) -> None:
         """
@@ -651,10 +667,9 @@ class AivmManager:
                 detail="AivisSpeech Engine には必ず 1 つ以上の音声合成モデルがインストールされている必要があります。",
             )
 
-        # AIVMX ファイルをアンインストール
-        ## AIVMX ファイルのファイル名は必ずしも "(音声合成モデルの UUID).aivmx" になるとは限らないため、
-        ## AivmInfo 内に格納されているファイルパスを使って削除する
-        ## 万が一 AIVMX ファイルが存在しない場合は無視する
+        # AIVM / AIVMX ファイルをアンインストール
+        ## 同一 UUID の .aivm と .aivmx は ggml/ONNX 互換ペアとして同時に存在しうるため、
+        ## 片方だけを残すと次回スキャン時にモデルが復活してしまう。該当 UUID のインストール済みファイルはまとめて削除する。
         if force is True:
             logger.info(
                 f"Force uninstalling model {aivm_model_uuid} from {target_info.file_path}..."
@@ -663,8 +678,47 @@ class AivmManager:
             logger.info(
                 f"Uninstalling model {aivm_model_uuid} from {target_info.file_path}..."
             )
-        target_info.file_path.unlink(missing_ok=True)
+        for model_file_path in self._find_installed_model_files(aivm_model_uuid):
+            model_file_path.unlink(missing_ok=True)
         logger.info(f"Uninstalled model {aivm_model_uuid}.")
+        self._delete_default_gguf_cache_entries(aivm_model_uuid)
 
         # リポジトリから当該モデルの情報を削除
         self._repository.remove_model(aivm_model_uuid)
+
+    def _find_installed_model_files(self, aivm_model_uuid: str) -> set[Path]:
+        """Find installed AIVM/AIVMX files whose manifest UUID matches."""
+
+        paths = {
+            self.installed_models_dir / f"{aivm_model_uuid}.aivm",
+            self.installed_models_dir / f"{aivm_model_uuid}.aivmx",
+        }
+        installed_info = self.get_installed_aivm_infos().get(aivm_model_uuid)
+        if installed_info is not None:
+            paths.add(installed_info.file_path)
+
+        for model_file_path in [
+            *self.installed_models_dir.glob("*.aivm"),
+            *self.installed_models_dir.glob("*.aivmx"),
+        ]:
+            if model_file_path in paths:
+                continue
+            try:
+                aivm_metadata, _ = read_aivm_metadata_from_path(model_file_path)
+            except aivmlib.AivmValidationError:
+                continue
+            if str(aivm_metadata.manifest.uuid) == aivm_model_uuid:
+                paths.add(model_file_path)
+
+        return paths
+
+    def _delete_default_gguf_cache_entries(self, aivm_model_uuid: str) -> None:
+        """Delete default GGUF cache entries for an installed model."""
+
+        try:
+            AivmGgufCache().delete_model_entries(aivm_model_uuid=aivm_model_uuid)
+        except OSError as ex:
+            logger.warning(
+                f"Failed to delete GGUF cache entries for model {aivm_model_uuid}.",
+                exc_info=ex,
+            )

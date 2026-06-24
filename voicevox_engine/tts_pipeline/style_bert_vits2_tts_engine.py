@@ -6,15 +6,13 @@ import shutil
 import threading
 import time
 from collections.abc import Sequence
-from io import BytesIO
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-import aivmlib
 import jaconv
 import numpy as np
 import onnxruntime
-from fastapi import HTTPException
 from numpy.typing import NDArray
 from onnxruntime.capi.onnxruntime_pybind11_state import InvalidProtobuf, NoSuchFile
 from style_bert_vits2.constants import (
@@ -23,7 +21,6 @@ from style_bert_vits2.constants import (
     Languages,
 )
 from style_bert_vits2.logging import logger as style_bert_vits2_logger
-from style_bert_vits2.models.hyper_parameters import HyperParameters
 from style_bert_vits2.nlp import onnx_bert_models
 from style_bert_vits2.nlp.japanese.g2p import g2p
 from style_bert_vits2.nlp.japanese.g2p_utils import g2kata_tone, kata_tone2phone_tone
@@ -34,8 +31,8 @@ from style_bert_vits2.nlp.japanese.mora_list import (
 )
 from style_bert_vits2.nlp.japanese.normalizer import normalize_text
 from style_bert_vits2.nlp.symbols import PUNCTUATIONS
-from style_bert_vits2.tts_model import TTSModel
 
+from ..aivm_gguf_cache import AivmGgufCache
 from ..aivm_manager import AivmManager
 from ..core.core_adapter import CoreAdapter, DeviceSupport
 from ..dev.core.mock import MockCoreWrapper
@@ -44,11 +41,33 @@ from ..metas.metas import StyleId
 from ..model import AudioQuery
 from ..tts_pipeline.audio_postprocessing import raw_wave_to_output_wave
 from ..tts_pipeline.model import AccentPhrase, Mora
+from ..tts_pipeline.style_bert_vits2_backend import (
+    FallbackStyleBertVITS2Backend,
+    GgmlVulkanStyleBertVITS2Backend,
+    OnnxStyleBertVITS2Backend,
+    StyleBertVITS2Backend,
+    StyleBertVITS2SynthesisRequest,
+)
+from ..tts_pipeline.tts_cpp_sidecar import ManagedTtsCppSidecar
 from ..tts_pipeline.tts_engine import (
     TTSEngine,
     to_flatten_moras,
 )
 from ..utility.path_utility import get_save_dir
+
+
+@dataclass(frozen=True)
+class SynthesisPerformanceTelemetry:
+    """Per-request synthesis timing data for backend comparison."""
+
+    served_backend: str
+    engine_prepare_seconds: float
+    inference_seconds: float
+    postprocess_seconds: float
+    total_seconds: float
+    output_duration_seconds: float
+    output_samples: int
+    rtf: float | None
 
 
 class StyleBertVITS2TTSEngine(TTSEngine):
@@ -72,10 +91,30 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         use_gpu: bool = False,
         load_all_models: bool = False,
         bert_model_cache_dir: Path | None = None,
+        tts_backend: str = "onnx",
+        ggml_vulkan_server_url: str = "http://127.0.0.1:8080",
+        ggml_vulkan_model: str | None = None,
+        ggml_jp_bert_model: str | None = None,
+        ggml_vulkan_strict: bool = False,
+        ggml_model_cache_dir: Path | None = None,
+        ggml_converter_path: Path | None = None,
+        ggml_converter_device: str = "cpu",
+        ggml_tts_server_path: Path | None = None,
+        ggml_tts_server_backend: str = "vulkan",
+        ggml_model_path: Path | None = None,
+        ggml_vulkan_device: str | None = None,
+        ggml_vulkan_precision: str = "accurate",
+        ggml_vulkan_allow_nonzero_sdp: bool = False,
+        ggml_synthesis_endpoint: str = "synthesize-front",
+        ggml_bert_payload_format: str = "base64",
+        ggml_tts_server_debug_timings: bool = False,
+        ggml_tts_server_log_path: Path | None = None,
     ) -> None:
         self.aivm_manager = aivm_manager
         self.use_gpu = use_gpu
         self.load_all_models = load_all_models
+        self.tts_backend = tts_backend
+        self._performance_backend_label = tts_backend
 
         # BERT モデルのキャッシュディレクトリ
         self._bert_model_cache_dir = (
@@ -85,9 +124,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         )
 
         # ロード済みモデルのキャッシュ
-        self.tts_models: dict[str, TTSModel] = {}
-        # ロード済みモデルのキャッシュへのアクセスを排他制御するためのロック
-        self._tts_models_lock: threading.Lock = threading.Lock()
+        self._backend: StyleBertVITS2Backend | None = None
 
         # ONNX Runtime の推論処理を排他制御するためのロック
         self._inference_lock: Final[threading.Lock] = threading.Lock()
@@ -152,6 +189,77 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         else:
             logger.info("Using CPU for inference.")
 
+        if tts_backend == "ggml-vulkan":
+            self._performance_backend_label = (
+                "ggml-cpu"
+                if ggml_tts_server_backend == "cpu"
+                else "ggml-vulkan"
+            )
+            logger.info(
+                f"Using TTS.cpp ggml/Vulkan sidecar backend at {ggml_vulkan_server_url}."
+            )
+            gguf_cache = (
+                AivmGgufCache(
+                    cache_dir=ggml_model_cache_dir,
+                    converter_path=ggml_converter_path,
+                    converter_device=ggml_converter_device,
+                )
+                if ggml_converter_path is not None
+                else None
+            )
+            managed_sidecar = (
+                ManagedTtsCppSidecar(
+                    tts_server_path=ggml_tts_server_path,
+                    backend=ggml_tts_server_backend,
+                    device=ggml_vulkan_device,
+                    vulkan_precision=ggml_vulkan_precision,
+                    debug_timings=ggml_tts_server_debug_timings,
+                    strict=ggml_vulkan_strict,
+                    log_path=ggml_tts_server_log_path,
+                )
+                if ggml_tts_server_path is not None
+                else None
+            )
+            ggml_backend = GgmlVulkanStyleBertVITS2Backend(
+                aivm_manager=self.aivm_manager,
+                onnx_providers=self.onnx_providers,
+                server_url=ggml_vulkan_server_url,
+                model_name=ggml_vulkan_model,
+                jp_bert_model_name=ggml_jp_bert_model,
+                gguf_cache=gguf_cache,
+                managed_sidecar=managed_sidecar,
+                tts_cpp_backend=ggml_tts_server_backend,
+                managed_model_path=ggml_model_path,
+                allow_nonzero_sdp=ggml_vulkan_allow_nonzero_sdp,
+                synthesis_endpoint=ggml_synthesis_endpoint,
+                bert_payload_format=ggml_bert_payload_format,
+            )
+            onnx_fallback_backend = OnnxStyleBertVITS2Backend(
+                aivm_manager=self.aivm_manager,
+                onnx_providers=self.onnx_providers,
+            )
+            self._backend = FallbackStyleBertVITS2Backend(
+                primary_backend=ggml_backend,
+                fallback_backend=onnx_fallback_backend,
+                strict=ggml_vulkan_strict,
+                primary_backend_label=self._performance_backend_label,
+                fallback_backend_label="onnx",
+            )
+        elif tts_backend != "onnx":
+            logger.warning(
+                f"Unknown TTS backend '{tts_backend}'. Falling back to ONNX Runtime backend.",
+            )
+            self._performance_backend_label = "onnx"
+            self._backend = OnnxStyleBertVITS2Backend(
+                aivm_manager=self.aivm_manager,
+                onnx_providers=self.onnx_providers,
+            )
+        else:
+            self._backend = OnnxStyleBertVITS2Backend(
+                aivm_manager=self.aivm_manager,
+                onnx_providers=self.onnx_providers,
+            )
+
         # Style-Bert-VITS2 本体のロガーを抑制
         style_bert_vits2_logger.remove()
 
@@ -210,6 +318,13 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         ## 継承元の TTSEngine は self._core に CoreWrapper を入れた CoreAdapter のインスタンスがないと動作しない
         self._core = CoreAdapter(MockCoreWrapper())
 
+    def close(self) -> None:
+        """Release resources owned by this engine."""
+
+        backend = self._backend
+        if isinstance(backend, FallbackStyleBertVITS2Backend):
+            backend.close()
+
     def _load_bert_model_and_tokenizer(self) -> None:
         """BERT モデルとトークナイザーをロードし、ローカルキャッシュを更新する。"""
         onnx_bert_models.load_model(
@@ -267,7 +382,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             ),
         )
 
-    def load_model(self, aivm_model_uuid: str) -> TTSModel:
+    def load_model(self, aivm_model_uuid: str) -> Any:
         """
         Style-Bert-VITS2 の音声合成モデルをロードする。
         StyleBertVITS2TTSEngine の初期化時に use_gpu=True が指定されている場合、モデルは GPU にロードされる。
@@ -284,62 +399,8 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             ロード済みの TTSModel インスタンス (キャッシュ済みの場合はそのまま返す)
         """
 
-        # 既に読み込まれている場合はそのまま返す
-        with self._tts_models_lock:
-            if aivm_model_uuid in self.tts_models:
-                return self.tts_models[aivm_model_uuid]
-
-        # AIVM メタデータを読み込む
-        aivm_info = self.aivm_manager.get_aivm_info(aivm_model_uuid)
-        try:
-            with open(aivm_info.file_path, mode="rb") as f:
-                aivm_metadata = aivmlib.read_aivmx_metadata(f)
-        except aivmlib.AivmValidationError as ex:
-            logger.error(
-                f"{aivm_info.file_path}: Failed to read AIVM metadata:", exc_info=ex
-            )
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to read AIVM metadata.",
-            ) from ex
-
-        # ハイパーパラメータを読み込む
-        hyper_parameters = HyperParameters.model_validate(
-            aivm_metadata.hyper_parameters.model_dump()
-        )
-
-        # スタイルベクトルを読み込む
-        assert aivm_metadata.style_vectors is not None
-        style_vectors = np.load(BytesIO(aivm_metadata.style_vectors))
-
-        # 音声合成モデルをロード
-        tts_model = TTSModel(
-            # 音声合成モデルのパスとして、AIVMX ファイル (ONNX 互換) のパスを指定
-            model_path=aivm_info.file_path,
-            # config_path とあるが、HyperParameters の Pydantic モデルを直接指定できる
-            config_path=hyper_parameters,
-            # style_vec_path とあるが、style_vectors の NDArray を直接指定できる
-            style_vec_path=style_vectors,
-            # ONNX 推論で利用する ExecutionProvider を指定
-            onnx_providers=self.onnx_providers,
-        )  # fmt: skip
-        start_time = time.time()
-        logger.info(f"Loading {aivm_info.manifest.name} ({aivm_model_uuid}) ...")
-        tts_model.load()
-        with self._tts_models_lock:
-            # ロード中に別スレッドが同一モデルを先にロードした場合は、そのインスタンスを優先して利用する
-            if aivm_model_uuid in self.tts_models:
-                logger.info(
-                    f"{aivm_info.manifest.name} ({aivm_model_uuid}) is already loaded in another thread. Using existing instance.",
-                )
-                return self.tts_models[aivm_model_uuid]
-            self.tts_models[aivm_model_uuid] = tts_model
-        self.aivm_manager.update_model_load_state(aivm_model_uuid, is_loaded=True)
-        logger.info(
-            f"{aivm_info.manifest.name} ({aivm_model_uuid}) loaded. ({time.time() - start_time:.2f}s)"
-        )
-
-        return tts_model
+        assert self._backend is not None
+        return self._backend.load_model(aivm_model_uuid)
 
     def unload_model(self, aivm_model_uuid: str) -> None:
         """
@@ -352,30 +413,8 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             AIVM マニフェスト記載の音声合成モデルの UUID
         """
 
-        aivm_info = self.aivm_manager.get_aivm_info(aivm_model_uuid)
-        start_time = time.time()
-        logger.info(f"Unloading {aivm_info.manifest.name} ({aivm_model_uuid}) ...")
-
-        with self._tts_models_lock:
-            # モデルがロードされていない場合は何もしない
-            if aivm_model_uuid not in self.tts_models:
-                logger.warning(
-                    f"TTS model {aivm_info.manifest.name} ({aivm_model_uuid}) is already unloaded. Skipping unload.",
-                )
-                self.aivm_manager.update_model_load_state(
-                    aivm_model_uuid,
-                    is_loaded=False,
-                )
-                return
-            tts_model = self.tts_models[aivm_model_uuid]
-            del self.tts_models[aivm_model_uuid]
-
-        # モデルをアンロード
-        tts_model.unload()
-        self.aivm_manager.update_model_load_state(aivm_model_uuid, is_loaded=False)
-        logger.info(
-            f"{aivm_info.manifest.name} ({aivm_model_uuid}) unloaded. ({time.time() - start_time:.2f}s)"
-        )
+        assert self._backend is not None
+        self._backend.unload_model(aivm_model_uuid)
 
     def is_model_loaded(self, aivm_model_uuid: str) -> bool:
         """
@@ -393,8 +432,8 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             モデルがロード済みかどうか
         """
 
-        with self._tts_models_lock:
-            return aivm_model_uuid in self.tts_models
+        assert self._backend is not None
+        return self._backend.is_model_loaded(aivm_model_uuid)
 
     def create_accent_phrases(
         self,
@@ -636,6 +675,9 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             生成された音声波形 (float32 型)
         """
 
+        request_start_time = time.perf_counter()
+        served_backend_label = self._performance_backend_label
+
         # モーフィング時などに同一参照の AudioQuery で複数回呼ばれる可能性があるので、元の引数の AudioQuery に破壊的変更を行わない
         query = copy.deepcopy(query)
 
@@ -776,6 +818,8 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         # 音声合成を実行
         ## 出力音声は int16 型の NDArray で返される
         ## 推論処理を大量に並列実行すると最悪プロセスごと ONNX Runtime がクラッシュするため、排他ロックを掛ける
+        inference_seconds = 0.0
+        inference_lock_start_time = time.perf_counter()
         with self._inference_lock:
             logger.info("Running inference...")
             logger.info(f"Text: {text}")
@@ -789,14 +833,16 @@ class StyleBertVITS2TTSEngine(TTSEngine):
 
             # テキストが空文字列ではなく、given_phone_list / given_tone_list が空でない場合のみ音声合成を実行
             if text != "" and len(given_phone_list) > 0 and len(given_tone_list) > 0:
-                start_time = time.time()
-                raw_sample_rate, raw_wave = model.infer(
+                inference_start_time = time.perf_counter()
+                assert self._backend is not None
+                synthesis_request = StyleBertVITS2SynthesisRequest(
                     text=text,
                     given_phone=given_phone_list,
                     given_tone=given_tone_list,
                     language=Languages.JP,
                     speaker_id=local_speaker_id,
                     style=local_style_name,
+                    style_id=local_style_id,
                     style_weight=style_weight,
                     sdp_ratio=sdp_ratio,
                     length=length,
@@ -805,13 +851,24 @@ class StyleBertVITS2TTSEngine(TTSEngine):
                     # line_split=True だと音素やアクセントの指定ができない
                     line_split=False,
                 )
-                logger.info(f"Inference done. Elapsed time: {time.time() - start_time:.2f} sec.")  # fmt: skip
+                raw_sample_rate, raw_wave = self._backend.synthesize(
+                    model,
+                    synthesis_request,
+                )
+                served_backend_label = _resolve_served_backend_label(
+                    default_backend=self._performance_backend_label,
+                    backend=self._backend,
+                )
+                inference_seconds = time.perf_counter() - inference_start_time
+                logger.info(f"Inference done. Elapsed time: {inference_seconds:.2f} sec.")  # fmt: skip
 
             # 空文字列が入力された場合、0.5 秒の無音波形を後続の処理に渡す
             else:
                 logger.info("Text is empty. Returning 0.5 sec silence.")
                 raw_sample_rate = self.default_sampling_rate
                 raw_wave = np.zeros(int(self.default_sampling_rate * 0.5), dtype=np.float32)  # fmt: skip
+
+        postprocess_start_time = time.perf_counter()
 
         # VOICEVOX CORE は float32 型の音声波形を返すため、int16 から float32 に変換して VOICEVOX CORE に合わせる
         ## float32 に変換する際に -1.0 ~ 1.0 の範囲に正規化する
@@ -835,6 +892,18 @@ class StyleBertVITS2TTSEngine(TTSEngine):
 
         # 生成した音声の音量調整/サンプルレート変更/ステレオ化を行ってから返す
         wave = raw_wave_to_output_wave(query, raw_wave, raw_sample_rate)
+        postprocess_seconds = time.perf_counter() - postprocess_start_time
+        total_seconds = time.perf_counter() - request_start_time
+        telemetry = _build_synthesis_performance_telemetry(
+            served_backend=served_backend_label,
+            engine_prepare_seconds=inference_lock_start_time - request_start_time,
+            inference_seconds=inference_seconds,
+            postprocess_seconds=postprocess_seconds,
+            total_seconds=total_seconds,
+            wave=wave,
+            output_sampling_rate=query.outputSamplingRate,
+        )
+        _log_synthesis_performance_telemetry(telemetry)
         return wave
 
     def initialize_synthesis(self, style_id: StyleId, skip_reinit: bool) -> None:
@@ -1026,3 +1095,69 @@ def _trim_silence(
     trimmed = audio[start_idx:end_idx]
 
     return trimmed
+
+
+def _build_synthesis_performance_telemetry(
+    *,
+    served_backend: str,
+    engine_prepare_seconds: float,
+    inference_seconds: float,
+    postprocess_seconds: float,
+    total_seconds: float,
+    wave: NDArray[np.float32],
+    output_sampling_rate: int,
+) -> SynthesisPerformanceTelemetry:
+    """Build timing telemetry from a completed synthesis request."""
+
+    output_samples = int(wave.shape[0])
+    output_duration_seconds = (
+        output_samples / output_sampling_rate if output_sampling_rate > 0 else 0.0
+    )
+    rtf = (
+        total_seconds / output_duration_seconds
+        if output_duration_seconds > 0.0
+        else None
+    )
+
+    return SynthesisPerformanceTelemetry(
+        served_backend=served_backend,
+        engine_prepare_seconds=engine_prepare_seconds,
+        inference_seconds=inference_seconds,
+        postprocess_seconds=postprocess_seconds,
+        total_seconds=total_seconds,
+        output_duration_seconds=output_duration_seconds,
+        output_samples=output_samples,
+        rtf=rtf,
+    )
+
+
+def _resolve_served_backend_label(
+    *,
+    default_backend: str,
+    backend: StyleBertVITS2Backend,
+) -> str:
+    """Return the backend that actually served a request when available."""
+
+    served_backend_label = getattr(backend, "last_served_backend_label", None)
+    if isinstance(served_backend_label, str) and served_backend_label != "":
+        return served_backend_label
+    return default_backend
+
+
+def _log_synthesis_performance_telemetry(
+    telemetry: SynthesisPerformanceTelemetry,
+) -> None:
+    """Log per-request timing data for backend performance comparison."""
+
+    rtf_text = f"{telemetry.rtf:.3f}" if telemetry.rtf is not None else "n/a"
+    logger.info(
+        "Synthesis performance: backend=%s, engine_prepare=%.3fs, inference=%.3fs, postprocess=%.3fs, total=%.3fs, output_duration=%.3fs, output_samples=%d, rtf=%s.",
+        telemetry.served_backend,
+        telemetry.engine_prepare_seconds,
+        telemetry.inference_seconds,
+        telemetry.postprocess_seconds,
+        telemetry.total_seconds,
+        telemetry.output_duration_seconds,
+        telemetry.output_samples,
+        rtf_text,
+    )

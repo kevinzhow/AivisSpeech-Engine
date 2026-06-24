@@ -40,13 +40,13 @@
         "description": "AIVM (Aivis Voice Model) 仕様に準拠した音声合成モデルのメタデータ情報。\n\nAIVM マニフェストには、音声合成モデルに関連する全てのメタデータが含まれる。\nspeakers フィールド内の話者情報は、VOICEVOX ENGINE との API 互換性のために、\nAIVM マニフェストを基に Speaker / SpeakerStyle / SpeakerInfo / StyleInfo モデルに変換したもの。",
         "properties": {
           "file_path": {
-            "description": "AIVMX ファイルのインストール先パス",
+            "description": "AIVM / AIVMX ファイルのインストール先パス",
             "format": "path",
             "title": "File Path",
             "type": "string"
           },
           "file_size": {
-            "description": "AIVMX ファイルのインストールサイズ (バイト単位)",
+            "description": "AIVM / AIVMX ファイルのインストールサイズ (バイト単位)",
             "title": "File Size",
             "type": "integer"
           },
@@ -426,7 +426,7 @@
                 "type": "null"
               }
             ],
-            "description": "AIVMX ファイル (`.aivmx`)",
+            "description": "AIVM / AIVMX ファイル (`.aivm`, `.aivmx`)",
             "title": "File"
           },
           "url": {
@@ -438,7 +438,7 @@
                 "type": "null"
               }
             ],
-            "description": "AIVMX ファイルの URL",
+            "description": "AIVM / AIVMX ファイルの URL",
             "title": "Url"
           }
         },

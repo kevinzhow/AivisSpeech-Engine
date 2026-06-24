@@ -420,6 +420,10 @@ class TTSEngineManager:
         """登録されたエンジンのバージョン一覧を取得する。"""
         return list(self._engines.keys())
 
+    def engines(self) -> list[TTSEngine]:
+        """登録されたエンジン一覧を取得する。"""
+        return list(self._engines.values())
+
     def _latest_version(self) -> str:
         return get_latest_version(self.versions())
 

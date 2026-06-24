@@ -50,11 +50,11 @@ def generate_aivm_models_router(
     def install_model(
         file: Annotated[
             UploadFile | None,
-            File(description="AIVMX ファイル (`.aivmx`)"),
+            File(description="AIVM / AIVMX ファイル (`.aivm`, `.aivmx`)"),
         ] = None,
         url: Annotated[
             str | None,
-            Form(description="AIVMX ファイルの URL"),
+            Form(description="AIVM / AIVMX ファイルの URL"),
         ] = None,
     ) -> None:
         """

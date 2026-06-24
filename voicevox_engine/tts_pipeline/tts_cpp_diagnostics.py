@@ -1,0 +1,32 @@
+"""Diagnostics helpers for TTS.cpp sidecar logs."""
+
+_VULKAN_DEVICE_LOG_PATTERNS = (
+    "ggml_vulkan",
+    "Vulkan0",
+    "Vulkan device",
+    "Vulkan physical device",
+    "AMD ",
+    "Radeon",
+    "NVIDIA",
+    "GeForce",
+    "Intel",
+    "Arc ",
+    "Apple",
+    "Mali",
+    "Adreno",
+)
+
+
+def extract_vulkan_device_log_evidence(sidecar_log: str) -> list[str]:
+    """Return log lines that prove a Vulkan device/backend was active."""
+
+    evidence: list[str] = []
+    for line in sidecar_log.splitlines():
+        stripped_line = line.strip()
+        if "Starting TTS.cpp sidecar:" in stripped_line:
+            continue
+        if stripped_line.startswith("STYLE_BERT_VITS2_"):
+            continue
+        if any(pattern in stripped_line for pattern in _VULKAN_DEVICE_LOG_PATTERNS):
+            evidence.append(stripped_line)
+    return evidence[:20]
