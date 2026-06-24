@@ -68,6 +68,22 @@ def _intersperse(items: list[Any], separator: Any) -> list[Any]:
     return result
 
 
+def _normalize_style_bert_vits2_pcm16(wave: NDArray[Any]) -> NDArray[np.int16]:
+    """Match Style-Bert-VITS2's float-to-int16 peak normalization."""
+
+    wave_i16 = np.asarray(wave, dtype=np.int16)
+    if wave_i16.size == 0:
+        return wave_i16
+
+    wave_f32 = wave_i16.astype(np.float32)
+    peak = float(np.abs(wave_f32).max())
+    if peak == 0.0:
+        return wave_i16
+
+    normalized = wave_f32 / peak * np.iinfo(np.int16).max
+    return normalized.astype(np.int16)
+
+
 @dataclass(frozen=True)
 class StyleBertVITS2SynthesisRequest:
     """Backend-neutral Style-Bert-VITS2 synthesis request."""
@@ -838,6 +854,7 @@ class GgmlVulkanStyleBertVITS2Backend:
         wave, sample_rate = sf.read(BytesIO(response.content), dtype="int16")
         if wave.ndim != 1:
             wave = wave[:, 0]
+        wave = _normalize_style_bert_vits2_pcm16(wave)
         wav_decode_elapsed = time.perf_counter() - decode_start_time
         jp_bert_timings = self._last_jp_bert_feature_timings
         self._last_synthesis_timings = GgmlSidecarSynthesisTimings(
@@ -982,6 +999,7 @@ class GgmlVulkanStyleBertVITS2Backend:
                 detail=f"TTS.cpp native binding inference failed: {ex}",
             ) from ex
 
+        wave = _normalize_style_bert_vits2_pcm16(wave)
         jp_bert_timings = self._last_jp_bert_feature_timings
         self._last_synthesis_timings = GgmlSidecarSynthesisTimings(
             transport="native-binding",

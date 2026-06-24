@@ -98,17 +98,20 @@ class _RecordingBackend:
 class _RecordingTTSModel:
     """推論直前の引数を記録する TTSModel 互換オブジェクト。"""
 
-    def __init__(self) -> None:
+    def __init__(self, wave: NDArray[np.int16] | None = None) -> None:
         self.hyper_parameters = SimpleNamespace(
             data=SimpleNamespace(style2id={"ノーマル": 0})
         )
         self.infer_kwargs: dict[str, Any] | None = None
+        self.wave = (
+            np.full(100, 32767, dtype=np.int16) if wave is None else np.array(wave)
+        )
 
     def infer(self, **kwargs: Any) -> tuple[int, NDArray[np.int16]]:
         """StyleBertVITS2TTSEngine から渡された推論引数を記録する。"""
 
         self.infer_kwargs = kwargs
-        return 44100, np.full(100, 32767, dtype=np.int16)
+        return 44100, np.array(self.wave, copy=True)
 
 
 class _BackendForFallbackTest:
@@ -476,6 +479,29 @@ def _synthesize_and_get_infer_kwargs(
     return recording_tts_model.infer_kwargs
 
 
+def test_normalize_style_bert_vits2_pcm16_matches_peak_normalization() -> None:
+    """GGML output is normalized like Style-Bert-VITS2's ONNX postprocess."""
+
+    wave = np.array([10, -20, 30], dtype=np.int16)
+
+    normalized = style_bert_vits2_backend._normalize_style_bert_vits2_pcm16(wave)
+
+    assert np.array_equal(
+        normalized,
+        np.array([10922, -21844, 32767], dtype=np.int16),
+    )
+
+
+def test_normalize_style_bert_vits2_pcm16_preserves_silence() -> None:
+    """Zero output remains zero instead of dividing by peak zero."""
+
+    wave = np.zeros(3, dtype=np.int16)
+
+    normalized = style_bert_vits2_backend._normalize_style_bert_vits2_pcm16(wave)
+
+    assert np.array_equal(normalized, wave)
+
+
 def test_synthesize_wave_runs_inference_through_backend() -> None:
     """推論処理が Style-Bert-VITS2 バックエンド経由で実行されることを確認する。"""
 
@@ -492,6 +518,45 @@ def test_synthesize_wave_runs_inference_through_backend() -> None:
     )
 
     assert engine.recording_backend.synthesize_call_count == 1
+
+
+def test_synthesize_wave_trims_silence_for_onnx_backend() -> None:
+    """ONNX backend keeps the existing engine-level silence trim."""
+
+    recording_tts_model = _RecordingTTSModel(
+        np.array([1, 2, 32767, 2, 1], dtype=np.int16)
+    )
+    engine = _generate_style_bert_vits2_tts_engine(recording_tts_model)
+
+    wave = engine.synthesize_wave(
+        _generate_audio_query(kana="テスト"),
+        StyleId(0),
+        enable_interrogative_upspeak=True,
+    )
+
+    assert wave.shape[0] == 1
+
+
+def test_synthesize_wave_preserves_ggml_decoder_span() -> None:
+    """GGML output is not threshold-trimmed after ONNX-compatible normalization."""
+
+    recording_tts_model = _RecordingTTSModel(
+        np.array([1, 2, 32767, 2, 1], dtype=np.int16)
+    )
+    engine = cast(
+        _StyleBertVITS2TTSEngineForTest,
+        _generate_style_bert_vits2_tts_engine(recording_tts_model),
+    )
+    engine._performance_backend_label = "ggml-vulkan"  # noqa: SLF001
+    engine.recording_backend.last_served_backend_label = "ggml-vulkan"
+
+    wave = engine.synthesize_wave(
+        _generate_audio_query(kana="テスト"),
+        StyleId(0),
+        enable_interrogative_upspeak=True,
+    )
+
+    assert wave.shape[0] == 5
 
 
 def test_synthesize_wave_logs_actual_served_backend_label(
@@ -754,7 +819,7 @@ def test_ggml_vulkan_backend_posts_synthesize_front_payload(
     sample_rate, wave = backend.synthesize(model, request)
 
     assert sample_rate == 44100
-    assert np.array_equal(wave, np.array([1, 2], dtype=np.int16))
+    assert np.array_equal(wave, np.array([16383, 32767], dtype=np.int16))
     assert (
         posted["url"] == "http://127.0.0.1:18080/v1/style-bert-vits2/synthesize-front"
     )
@@ -851,7 +916,7 @@ def test_ggml_vulkan_backend_can_synthesize_with_native_binding(
     sample_rate, wave = backend.synthesize(model, request)
 
     assert sample_rate == 48000
-    assert np.array_equal(wave, np.array([10, -20, 30], dtype=np.int16))
+    assert np.array_equal(wave, np.array([10922, -21844, 32767], dtype=np.int16))
     assert len(native_binding.synthesize_front_calls) == 1
     native_call = native_binding.synthesize_front_calls[0]
     assert native_call["native_model"] is native_model
@@ -1168,7 +1233,7 @@ def test_ggml_vulkan_backend_can_use_synthesize_symbols_endpoint(
     sample_rate, wave = backend.synthesize(model, request)
 
     assert sample_rate == 44100
-    assert np.array_equal(wave, np.array([1, 2], dtype=np.int16))
+    assert np.array_equal(wave, np.array([16383, 32767], dtype=np.int16))
     assert (
         posted["url"]
         == "http://127.0.0.1:18080/v1/style-bert-vits2/synthesize-symbols"
@@ -1373,7 +1438,7 @@ def test_ggml_vulkan_backend_can_use_tts_cpp_jp_bert_frontend(
     sample_rate, wave = backend.synthesize(model, request)
 
     assert sample_rate == 44100
-    assert np.array_equal(wave, np.array([1, 2], dtype=np.int16))
+    assert np.array_equal(wave, np.array([16383, 32767], dtype=np.int16))
     assert posted["tokenizer_text"] == "テ"
     assert posted["tokenizer_return_tensors"] == "np"
     assert posted["jp_bert_headers"] == {"Content-Type": "application/json"}

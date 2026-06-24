@@ -848,6 +848,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         ## 推論処理を大量に並列実行すると最悪プロセスごと ONNX Runtime がクラッシュするため、排他ロックを掛ける
         inference_seconds = 0.0
         inference_lock_start_time = time.perf_counter()
+        served_backend_label = self._performance_backend_label
         with self._inference_lock:
             logger.info("Running inference...")
             logger.info(f"Text: {text}")
@@ -904,7 +905,10 @@ class StyleBertVITS2TTSEngine(TTSEngine):
 
         # 学習元データなどの関係でモデルによっては音声の前後に無音が含まれることがあるため、後処理前に前後の無音をトリミングする
         ## この処理を行ってから再度指定秒数の無音区間を追加することで、無音区間が指定以上に長くなるのを防ぐ
-        raw_wave = _trim_silence(raw_wave)
+        ## ggml バックエンドは Style-Bert-VITS2/ONNX と同じピーク正規化をバックエンド境界で行う
+        ## さらに閾値トリムすると、微小な数値差で有効な低エネルギーの先頭/末尾が削られて ONNX と長さがずれる
+        if _should_trim_silence_for_backend(served_backend_label):
+            raw_wave = _trim_silence(raw_wave)
 
         # 前後の無音区間を追加
         ## VOICEVOX の TTSEngine との互換性のため、音声合成側と同様に AudioQuery の speedScale を加味する
@@ -1123,6 +1127,12 @@ def _trim_silence(
     trimmed = audio[start_idx:end_idx]
 
     return trimmed
+
+
+def _should_trim_silence_for_backend(served_backend_label: str) -> bool:
+    """Return whether engine-level threshold trim should run for a backend."""
+
+    return served_backend_label.startswith("ggml") is False
 
 
 def _build_synthesis_performance_telemetry(
