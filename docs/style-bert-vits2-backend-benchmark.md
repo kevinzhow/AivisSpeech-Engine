@@ -35,7 +35,7 @@ is better.
 | ggml Vulkan iGPU | AMD Radeon 780M Graphics (RADV PHOENIX), integrated GPU, vendor `0x1002`, device `0x1900`, Vulkan API `1.4.335`, Mesa `26.0.3-1ubuntu1`, UMA `1`, fp16 `0`, bf16 `0`, warp size `64`, shared memory `65536`, int dot `1` |
 | ggml Vulkan NVIDIA | NVIDIA GeForce RTX 3060, discrete GPU, vendor `0x10de`, device `0x2504`, Vulkan API `1.4.329`, driver `595.71.05`, VRAM `12288 MiB`, PCI bus `00000000:01:00.0`, power limit `170 W`, UMA `0`, fp16 `0`, bf16 `1`, warp size `32`, shared memory `49152`, int dot `1` |
 | macOS Metal host | macOS 27.0 build `26A5368g`, Apple M1 Pro, 10 CPU cores, 32 GiB RAM |
-| ggml Metal | Apple M1 Pro, TTS.cpp `ea100b4`, ggml `dfce34f5`, `BUILD_SHARED_LIBS=ON`, `GGML_METAL=ON`, `GGML_METAL_NO_RESIDENCY=1` |
+| ggml Metal | Apple M1 Pro, TTS.cpp `fd4d1e1`, ggml `d189e596`, `BUILD_SHARED_LIBS=ON`, `GGML_METAL=ON`, `GGML_METAL_NO_RESIDENCY=1`, Style-Bert fused Metal ConvTranspose1D enabled by default |
 
 The benchmark pinned the TTS.cpp Vulkan device with `GGML_VK_VISIBLE_DEVICES`.
 The captured TTS.cpp device evidence was:
@@ -149,33 +149,50 @@ Interpretation:
 
 This run used the TTS.cpp native C API from `libtts.dylib`, not the managed
 `tts-server` sidecar. It used `kevinzhow/style-bert-vits2-gguf` for the
-preconverted `mao-full-sdp.gguf` and JP-BERT GGUF artifacts.
+preconverted `mao-full-sdp.gguf` and JP-BERT GGUF artifacts. The TTS.cpp build
+includes the Style-Bert decoder-specific Metal fused ConvTranspose1D path from
+TTS.cpp `fd4d1e1` / ggml `d189e596`, which writes cropped output directly and
+fuses the bias add.
 
 | text length | ONNX CPU RTF | ggml Metal native RTF | Metal/ONNX CPU ratio |
 | --- | ---: | ---: | ---: |
-| short | `0.302` | `0.268` | `0.887` |
-| medium | `0.276` | `0.191` | `0.692` |
-| long | `0.246` | `0.166` | `0.675` |
-| overall mean | `0.274` | `0.208` | `0.759` |
+| short | `0.298` | `0.231` | `0.776` |
+| medium | `0.275` | `0.170` | `0.616` |
+| long | `0.246` | `0.144` | `0.586` |
+| overall mean | `0.273` | `0.182` | `0.665` |
 
 Native timing breakdown for `ggml-metal-jp-bert-native`:
 
 | text length | frontend seconds | native synthesis seconds | native JP-BERT seconds |
 | --- | ---: | ---: | ---: |
-| short | `0.068` | `0.189` | `0.067` |
-| medium | `0.053` | `0.274` | `0.052` |
-| long | `0.076` | `1.181` | `0.074` |
+| short | `0.055` | `0.167` | `0.054` |
+| medium | `0.053` | `0.237` | `0.052` |
+| long | `0.076` | `1.015` | `0.074` |
 
 The result JSON is
-`/tmp/aivis-style-bert-vits2-benchmark-metal-native.json`; the log is
-`/tmp/aivis-style-bert-vits2-benchmark-metal-native.log`. The log showed:
+`/tmp/aivis-style-bert-vits2-benchmark-metal-native-fused.json`; the log is
+`/tmp/aivis-style-bert-vits2-benchmark-metal-native-fused.log`. The log showed:
 
 ```text
 ggml_metal_device_init: GPU name:   MTL0 (Apple M1 Pro)
 ggml_metal_device_init: use residency sets    = false
 ggml_metal_init: found device: Apple M1 Pro
 Using TTS.cpp ggml/metal native binding at /Users/kevinzhow/Github/TTS.cpp/build-metal-shared/src/libtts.dylib.
+kernel_style_bert_vits2_conv_transpose_1d_f32
 ```
+
+The fused ConvTranspose1D path is enabled by default when the native binding
+sets `TTS_BACKEND=metal`. A one-text native binding probe with
+`--warmup_runs 1 --runs 1` on a 94-character input compared the opt-out path
+against the default fused path:
+
+| Metal ConvTranspose1D path | RTF | native synthesis seconds | decoder seconds | decoder nodes |
+| --- | ---: | ---: | ---: | ---: |
+| `STYLE_BERT_VITS2_METAL_FUSED_CONV_TRANSPOSE_1D=0` | `0.187` | `2.921` | `2.013` | `367` |
+| default fused | `0.165` | `2.563` | `1.653` | `356` |
+
+For that probe, the default fused path reduced native synthesis time by `12.3%`
+and decoder time by `17.9%`.
 
 ## Reproduction
 
@@ -312,8 +329,9 @@ cmake --build /Users/kevinzhow/Github/TTS.cpp/build-metal-shared \
   --target tts \
   -j "$(sysctl -n hw.ncpu)"
 
-DYLD_LIBRARY_PATH="/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/src:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src/ggml-blas:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src/ggml-metal" \
+DYLD_LIBRARY_PATH="/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/src:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src/ggml-blas:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src/ggml-metal:/Users/kevinzhow/Github/TTS.cpp/build-metal-shared/ggml/src/ggml-cpu" \
 GGML_METAL_NO_RESIDENCY=1 \
+STYLE_BERT_VITS2_DEBUG_TIMINGS=1 \
 uv run --group dev python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --aivm_path /Users/kevinzhow/.Trash/まお.aivm \
   --aivmx_path "/Users/kevinzhow/Library/Application Support/AivisSpeech-Engine/Models/a59cb814-0083-4369-8542-f51a29e72af7.aivmx" \
@@ -331,8 +349,8 @@ uv run --group dev python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --text 'これは少し長めの文章です。GPUバックエンドの推論速度と音声品質を確認しています。' \
   --warmup_runs 1 \
   --runs 3 \
-  --output_json /tmp/aivis-style-bert-vits2-benchmark-metal-native.json \
-  > /tmp/aivis-style-bert-vits2-benchmark-metal-native.log 2>&1
+  --output_json /tmp/aivis-style-bert-vits2-benchmark-metal-native-fused.json \
+  > /tmp/aivis-style-bert-vits2-benchmark-metal-native-fused.log 2>&1
 ```
 
 The Metal native run is labeled as `ggml-metal-jp-bert-native` in the JSON
