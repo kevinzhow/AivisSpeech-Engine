@@ -18,6 +18,7 @@ from voicevox_engine.tts_pipeline.style_bert_vits2_tts_engine import (
     StyleBertVITS2TTSEngine,
 )
 from voicevox_engine.tts_pipeline.tts_cpp_diagnostics import (
+    extract_metal_device_log_evidence,
     extract_vulkan_device_log_evidence,
 )
 from voicevox_engine.utility.aivishub_client import (
@@ -330,18 +331,18 @@ def _assert_postprocessed_duration_parity(
     metrics: dict[str, float],
     context: str,
 ) -> None:
-    assert (
-        metrics["duration_delta_seconds"] <= _DURATION_TOLERANCE_SECONDS
-    ), f"{context}: total duration delta exceeded tolerance: {metrics}"
-    assert (
-        metrics["non_silence_delta_seconds"] <= _DURATION_TOLERANCE_SECONDS
-    ), f"{context}: non-silence duration delta exceeded tolerance: {metrics}"
-    assert (
-        metrics["leading_silence_delta_seconds"] <= _DURATION_TOLERANCE_SECONDS
-    ), f"{context}: leading silence delta exceeded tolerance: {metrics}"
-    assert (
-        metrics["trailing_silence_delta_seconds"] <= _DURATION_TOLERANCE_SECONDS
-    ), f"{context}: trailing silence delta exceeded tolerance: {metrics}"
+    assert metrics["duration_delta_seconds"] <= _DURATION_TOLERANCE_SECONDS, (
+        f"{context}: total duration delta exceeded tolerance: {metrics}"
+    )
+    assert metrics["non_silence_delta_seconds"] <= _DURATION_TOLERANCE_SECONDS, (
+        f"{context}: non-silence duration delta exceeded tolerance: {metrics}"
+    )
+    assert metrics["leading_silence_delta_seconds"] <= _DURATION_TOLERANCE_SECONDS, (
+        f"{context}: leading silence delta exceeded tolerance: {metrics}"
+    )
+    assert metrics["trailing_silence_delta_seconds"] <= _DURATION_TOLERANCE_SECONDS, (
+        f"{context}: trailing silence delta exceeded tolerance: {metrics}"
+    )
 
 
 def _assert_empty_text_wave_parity(
@@ -369,9 +370,13 @@ def _assert_sidecar_log_proves_backend(
     sidecar_log = sidecar_log_path.read_text(encoding="utf-8")
     assert f"POST /v1/style-bert-vits2/{synthesis_endpoint}" in sidecar_log
     if tts_cpp_backend == "vulkan":
-        assert (
-            len(extract_vulkan_device_log_evidence(sidecar_log)) > 0
-        ), "TTS.cpp Vulkan sidecar log lacks Vulkan device evidence."
+        assert len(extract_vulkan_device_log_evidence(sidecar_log)) > 0, (
+            "TTS.cpp Vulkan sidecar log lacks Vulkan device evidence."
+        )
+    if tts_cpp_backend == "metal":
+        assert len(extract_metal_device_log_evidence(sidecar_log)) > 0, (
+            "TTS.cpp Metal sidecar log lacks Metal device evidence."
+        )
     if frontend_mode == "tts-cpp-jp-bert":
         assert "POST /v1/style-bert-vits2/jp-bert/features" in sidecar_log
     expected_log_text = os.getenv("AIVIS_GGML_TEST_EXPECT_LOG_CONTAINS")
@@ -466,12 +471,9 @@ def test_managed_ggml_vulkan_sidecar_matches_onnx_duration_with_local_artifacts(
         for vulkan_precision in vulkan_precisions:
             for frontend_mode in frontend_modes:
                 for synthesis_endpoint in synthesis_endpoints:
-                    sidecar_log_path = (
-                        tmp_path
-                        / (
-                            "tts-cpp-sidecar-"
-                            f"{vulkan_precision}-{frontend_mode}-{synthesis_endpoint}.log"
-                        )
+                    sidecar_log_path = tmp_path / (
+                        "tts-cpp-sidecar-"
+                        f"{vulkan_precision}-{frontend_mode}-{synthesis_endpoint}.log"
                     )
                     ggml_model_path = _prepare_tts_cpp_model_path(
                         tmp_path=tmp_path,

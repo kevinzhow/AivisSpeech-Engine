@@ -1,4 +1,4 @@
-"""Benchmark Style-Bert-VITS2 ONNX CPU against ggml/Vulkan transports."""
+"""Benchmark Style-Bert-VITS2 ONNX CPU against ggml GPU transports."""
 
 # ruff: noqa: E402
 
@@ -30,6 +30,7 @@ from voicevox_engine.tts_pipeline.style_bert_vits2_tts_engine import (
     StyleBertVITS2TTSEngine,
 )
 from voicevox_engine.tts_pipeline.tts_cpp_diagnostics import (
+    extract_metal_device_log_evidence,
     extract_vulkan_device_log_evidence,
 )
 from voicevox_engine.utility.aivishub_client import (
@@ -45,6 +46,7 @@ _DEFAULT_TEXTS = [
     "えっと...本当に、これで大丈夫ですか？はい、大丈夫です。",
     "これは少し長めの文章です。音声合成のバックエンドを切り替えても、長さや前後の無音が大きく変わらないことを確認します。",
 ]
+_GGML_ACCELERATOR_BACKENDS = ("vulkan", "metal")
 
 
 class _NoNetworkAivisHubClient(AivisHubClient):
@@ -459,9 +461,7 @@ def _summarize_backend_timings_by_text(
             ]
             if len(backend_records) == 0:
                 continue
-            text_summary[backend] = _summarize_backend_timings_subset(
-                backend_records
-            )
+            text_summary[backend] = _summarize_backend_timings_subset(backend_records)
         summary_by_text[text] = text_summary
     return summary_by_text
 
@@ -576,12 +576,15 @@ def _rtf_ratios_vs_backend(
     }
 
 
-def _ggml_vulkan_backend_names(records: list[_BenchmarkRecord]) -> list[str]:
+def _ggml_accelerator_backend_names(records: list[_BenchmarkRecord]) -> list[str]:
     return sorted(
         {
             record.backend
             for record in records
-            if record.backend.startswith("ggml-vulkan")
+            if any(
+                record.backend.startswith(f"ggml-{backend_name}")
+                for backend_name in _GGML_ACCELERATOR_BACKENDS
+            )
         }
     )
 
@@ -626,7 +629,7 @@ def _evaluate_performance_gates(
     ggml_vulkan_mean_rtf_ratio_vs_onnx_cpu_at_most: float | None,
     ggml_vulkan_per_text_rtf_ratio_vs_onnx_cpu_at_most: float | None,
 ) -> dict[str, Any]:
-    """Evaluate optional Stage 5 performance gates for ggml/Vulkan runs."""
+    """Evaluate optional Stage 5 performance gates for ggml accelerator runs."""
 
     checks: list[dict[str, Any]] = []
     violations: list[str] = []
@@ -639,9 +642,11 @@ def _evaluate_performance_gates(
             ggml_vulkan_per_text_rtf_ratio_vs_onnx_cpu_at_most,
         )
     )
-    backend_names = _ggml_vulkan_backend_names(records)
+    backend_names = _ggml_accelerator_backend_names(records)
     if enabled and len(backend_names) == 0:
-        violations.append("No ggml-vulkan benchmark records were available.")
+        violations.append(
+            "No ggml-vulkan or ggml-metal benchmark records were available."
+        )
 
     summary = _summarize(records)
     per_text_summary = _summarize_by_text(records)
@@ -709,6 +714,12 @@ def _extract_vulkan_device_log_evidence(sidecar_log: str) -> list[str]:
     """Return log lines that prove a Vulkan device/backend was active."""
 
     return extract_vulkan_device_log_evidence(sidecar_log)
+
+
+def _extract_metal_device_log_evidence(sidecar_log: str) -> list[str]:
+    """Return log lines that prove a Metal device/backend was active."""
+
+    return extract_metal_device_log_evidence(sidecar_log)
 
 
 def _coerce_log_value(value: str) -> str | int | float:
@@ -779,9 +790,9 @@ def _extract_tts_cpp_style_bert_timings(sidecar_log: str) -> dict[str, Any]:
             field_value = fields.get(key)
             if isinstance(field_value, (int, float)):
                 summary_key = f"{key}_sum"
-                marker_summary[summary_key] = (
-                    float(marker_summary.get(summary_key, 0.0)) + float(field_value)
-                )
+                marker_summary[summary_key] = float(
+                    marker_summary.get(summary_key, 0.0)
+                ) + float(field_value)
 
         if isinstance(fields.get("compute_submit_ms"), (int, float)):
             graph_event_totals["count"] = int(graph_event_totals["count"]) + 1
@@ -789,9 +800,9 @@ def _extract_tts_cpp_style_bert_timings(sidecar_log: str) -> dict[str, Any]:
                 field_value = fields.get(key)
                 if isinstance(field_value, (int, float)):
                     totals_key = f"{key}_sum"
-                    graph_event_totals[totals_key] = (
-                        float(graph_event_totals[totals_key]) + float(field_value)
-                    )
+                    graph_event_totals[totals_key] = float(
+                        graph_event_totals[totals_key]
+                    ) + float(field_value)
 
     event_limit = 200
     return {
@@ -808,7 +819,7 @@ def _read_sidecar_diagnostics(
     spec: _GgmlBackendSpec,
     log_path: Path,
 ) -> dict[str, Any]:
-    """Read sidecar log diagnostics and enforce Vulkan device evidence."""
+    """Read sidecar log diagnostics and enforce accelerator device evidence."""
 
     sidecar_log = log_path.read_text(encoding="utf-8")
     if spec.expected_log_text is not None and spec.expected_log_text not in sidecar_log:
@@ -822,9 +833,19 @@ def _read_sidecar_diagnostics(
         if spec.tts_cpp_backend == "vulkan"
         else []
     )
+    metal_device_evidence = (
+        _extract_metal_device_log_evidence(sidecar_log)
+        if spec.tts_cpp_backend == "metal"
+        else []
+    )
     if spec.tts_cpp_backend == "vulkan" and len(vulkan_device_evidence) == 0:
         raise RuntimeError(
             "TTS.cpp Vulkan sidecar log did not contain Vulkan device evidence. "
+            f"Check for CPU fallback or missing device logs: {log_path}"
+        )
+    if spec.tts_cpp_backend == "metal" and len(metal_device_evidence) == 0:
+        raise RuntimeError(
+            "TTS.cpp Metal sidecar log did not contain Metal device evidence. "
             f"Check for CPU fallback or missing device logs: {log_path}"
         )
 
@@ -839,6 +860,10 @@ def _read_sidecar_diagnostics(
         "log_path": str(log_path),
         "expected_log_text": spec.expected_log_text,
         "vulkan_device_evidence": vulkan_device_evidence,
+        "metal_device_evidence": metal_device_evidence,
+        "accelerator_device_evidence": (
+            vulkan_device_evidence or metal_device_evidence
+        ),
         "style_bert_vits2_timings": style_bert_timings,
     }
 
@@ -854,7 +879,9 @@ def _parse_ggml_backend_specs(args: argparse.Namespace) -> list[_GgmlBackendSpec
         else "sidecar-http"
     )
     transport_suffix = "-native" if transport == "native-binding" else ""
-    if transport == "native-binding" and synthesis_endpoint_names != ["synthesize-front"]:
+    if transport == "native-binding" and synthesis_endpoint_names != [
+        "synthesize-front"
+    ]:
         raise ValueError(
             "--ggml_native_library_path currently supports only "
             "--ggml_synthesis_endpoint synthesize-front."
@@ -909,6 +936,27 @@ def _parse_ggml_backend_specs(args: argparse.Namespace) -> list[_GgmlBackendSpec
                                 ),
                             )
                         )
+                elif backend_name == "metal":
+                    specs.append(
+                        _GgmlBackendSpec(
+                            name=f"ggml-metal{frontend_suffix}{endpoint_suffix}{transport_suffix}",
+                            tts_cpp_backend="metal",
+                            transport=transport,
+                            vulkan_precision=None,
+                            use_tts_cpp_jp_bert=use_tts_cpp_jp_bert,
+                            synthesis_endpoint=synthesis_endpoint_name,
+                            expected_log_text=(
+                                args.expect_sidecar_log_contains
+                                if transport == "sidecar-http"
+                                else None
+                            ),
+                            require_style_bert_timings=(
+                                args.ggml_debug_timings
+                                if transport == "sidecar-http"
+                                else False
+                            ),
+                        )
+                    )
                 elif backend_name == "cpu":
                     specs.append(
                         _GgmlBackendSpec(
@@ -991,7 +1039,7 @@ def _loaded_onnx_model_providers(model: Any) -> list[str]:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark AivisSpeech Style-Bert-VITS2 ONNX CPU vs ggml/Vulkan. "
+            "Benchmark AivisSpeech Style-Bert-VITS2 ONNX CPU vs ggml GPU backends. "
             "The ggml path uses AIVM/Safetensors plus a preconverted GGUF; "
             "AIVMX/ONNX is only used for the ONNX baseline."
         )
@@ -1019,7 +1067,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ggml_backend",
         action="append",
-        choices=["vulkan", "cpu"],
+        choices=["vulkan", "metal", "cpu"],
         help=("ggml backend to benchmark. Repeat to run a matrix. Default: vulkan."),
     )
     parser.add_argument(
@@ -1049,7 +1097,13 @@ def _parse_args() -> argparse.Namespace:
             "using bert_b64; json-array keeps the older float-array request shape."
         ),
     )
-    parser.add_argument("--tts_device")
+    parser.add_argument(
+        "--tts_device",
+        help=(
+            "Backend-local TTS_DEVICE value for accelerator runs, such as a "
+            "Vulkan or Metal device index."
+        ),
+    )
     parser.add_argument(
         "--ggml_vulkan_precision",
         action="append",
@@ -1074,8 +1128,17 @@ def _parse_args() -> argparse.Namespace:
             "and require timing evidence in the sidecar logs."
         ),
     )
-    parser.add_argument("--expect_sidecar_log_contains")
-    parser.add_argument("--expect_cpu_sidecar_log_contains")
+    parser.add_argument(
+        "--expect_sidecar_log_contains",
+        help=(
+            "Require this text in each managed accelerator sidecar log, useful "
+            "for pinning an expected Vulkan or Metal device name."
+        ),
+    )
+    parser.add_argument(
+        "--expect_cpu_sidecar_log_contains",
+        help="Require this text in each managed CPU sidecar log.",
+    )
     parser.add_argument("--text", action="append", dest="texts")
     parser.add_argument("--style_id", action="append", type=int, default=[])
     parser.add_argument("--max_styles", type=int, default=1)
@@ -1086,32 +1149,34 @@ def _parse_args() -> argparse.Namespace:
         "--expect_ggml_vulkan_mean_rtf_at_most",
         type=float,
         help=(
-            "Fail if any ggml-vulkan* backend's overall mean RTF is above this "
-            "inclusive threshold."
+            "Fail if any ggml-vulkan* or ggml-metal* backend's overall mean "
+            "RTF is above this inclusive threshold."
         ),
     )
     parser.add_argument(
         "--expect_ggml_vulkan_per_text_rtf_at_most",
         type=float,
         help=(
-            "Fail if any ggml-vulkan* backend's per-text mean RTF is above this "
-            "inclusive threshold."
+            "Fail if any ggml-vulkan* or ggml-metal* backend's per-text mean "
+            "RTF is above this inclusive threshold."
         ),
     )
     parser.add_argument(
         "--expect_ggml_vulkan_mean_rtf_ratio_vs_onnx_cpu_at_most",
         type=float,
         help=(
-            "Fail if any ggml-vulkan* backend's overall mean RTF ratio versus "
-            "ONNX CPU is above this inclusive threshold. Values below 1.0 are faster."
+            "Fail if any ggml-vulkan* or ggml-metal* backend's overall mean "
+            "RTF ratio versus ONNX CPU is above this inclusive threshold. "
+            "Values below 1.0 are faster."
         ),
     )
     parser.add_argument(
         "--expect_ggml_vulkan_per_text_rtf_ratio_vs_onnx_cpu_at_most",
         type=float,
         help=(
-            "Fail if any ggml-vulkan* backend's per-text mean RTF ratio versus "
-            "ONNX CPU is above this inclusive threshold. Values below 1.0 are faster."
+            "Fail if any ggml-vulkan* or ggml-metal* backend's per-text mean "
+            "RTF ratio versus ONNX CPU is above this inclusive threshold. "
+            "Values below 1.0 are faster."
         ),
     )
     parser.add_argument("--keep_work_dir", action="store_true")
@@ -1234,7 +1299,7 @@ def main() -> None:
                 ggml_model_path=ggml_model_path,
                 ggml_vulkan_device=(
                     args.tts_device
-                    if ggml_backend_spec.tts_cpp_backend == "vulkan"
+                    if ggml_backend_spec.tts_cpp_backend != "cpu"
                     else None
                 ),
                 ggml_vulkan_precision=(
@@ -1260,11 +1325,9 @@ def main() -> None:
             )
 
             if ggml_backend_spec.transport == "sidecar-http":
-                sidecar_diagnostics[ggml_backend_spec.name] = (
-                    _read_sidecar_diagnostics(
-                        spec=ggml_backend_spec,
-                        log_path=backend_log_path,
-                    )
+                sidecar_diagnostics[ggml_backend_spec.name] = _read_sidecar_diagnostics(
+                    spec=ggml_backend_spec,
+                    log_path=backend_log_path,
                 )
             else:
                 sidecar_diagnostics[ggml_backend_spec.name] = {
@@ -1272,6 +1335,8 @@ def main() -> None:
                     "log_path": None,
                     "expected_log_text": None,
                     "vulkan_device_evidence": [],
+                    "metal_device_evidence": [],
+                    "accelerator_device_evidence": [],
                     "style_bert_vits2_timings": {
                         "event_count": 0,
                         "events": [],
@@ -1308,9 +1373,7 @@ def main() -> None:
         )
         performance_gates = _evaluate_performance_gates(
             records,
-            ggml_vulkan_mean_rtf_at_most=(
-                args.expect_ggml_vulkan_mean_rtf_at_most
-            ),
+            ggml_vulkan_mean_rtf_at_most=(args.expect_ggml_vulkan_mean_rtf_at_most),
             ggml_vulkan_per_text_rtf_at_most=(
                 args.expect_ggml_vulkan_per_text_rtf_at_most
             ),
@@ -1355,9 +1418,7 @@ def main() -> None:
                         "tts_cpp_backend": ggml_backend_spec.tts_cpp_backend,
                         "transport": ggml_backend_spec.transport,
                         "vulkan_precision": ggml_backend_spec.vulkan_precision,
-                        "use_tts_cpp_jp_bert": (
-                            ggml_backend_spec.use_tts_cpp_jp_bert
-                        ),
+                        "use_tts_cpp_jp_bert": (ggml_backend_spec.use_tts_cpp_jp_bert),
                         "synthesis_endpoint": ggml_backend_spec.synthesis_endpoint,
                     }
                     for ggml_backend_spec in ggml_backend_specs

@@ -198,15 +198,19 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             self._performance_backend_label = (
                 "ggml-cpu"
                 if ggml_tts_server_backend == "cpu"
-                else "ggml-vulkan"
+                else f"ggml-{ggml_tts_server_backend}"
             )
             if ggml_native_library_path is not None:
                 logger.info(
-                    f"Using TTS.cpp ggml/Vulkan native binding at {ggml_native_library_path}."
+                    "Using TTS.cpp ggml/%s native binding at %s.",
+                    ggml_tts_server_backend,
+                    ggml_native_library_path,
                 )
             else:
                 logger.info(
-                    f"Using TTS.cpp ggml/Vulkan sidecar backend at {ggml_vulkan_server_url}."
+                    "Using TTS.cpp ggml/%s sidecar backend at %s.",
+                    ggml_tts_server_backend,
+                    ggml_vulkan_server_url,
                 )
             gguf_cache = (
                 AivmGgufCache(
@@ -227,8 +231,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
                     strict=ggml_vulkan_strict,
                     log_path=ggml_tts_server_log_path,
                 )
-                if ggml_tts_server_path is not None
-                and ggml_native_library_path is None
+                if ggml_tts_server_path is not None and ggml_native_library_path is None
                 else None
             )
             native_binding = (

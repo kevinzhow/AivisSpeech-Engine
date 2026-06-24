@@ -279,7 +279,8 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
         default="onnx",
         help=(
             "音声合成に使う TTS バックエンドです。"
-            "onnx は既存の ONNX Runtime バックエンド、ggml-vulkan は実験的な ggml/Vulkan バックエンドです。"
+            "onnx は既存の ONNX Runtime バックエンド、ggml-vulkan は実験的な ggml バックエンドです。"
+            "TTS.cpp 側の実行 backend は --ggml_tts_server_backend で選択します。"
         ),
     )
     parser.add_argument(
@@ -344,11 +345,12 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
     )
     parser.add_argument(
         "--ggml_tts_server_backend",
-        choices=["vulkan", "cpu"],
+        choices=["vulkan", "metal", "cpu"],
         default="vulkan",
         help=(
             "managed sidecar として起動する TTS.cpp tts-server の backend です。"
-            "通常は vulkan を指定します。cpu は ggml CPU との性能比較用です。"
+            "Linux/Windows では vulkan、macOS では metal を指定できます。"
+            "cpu は ggml CPU との性能比較用です。"
         ),
     )
     parser.add_argument(
@@ -364,7 +366,7 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
     parser.add_argument(
         "--ggml_vulkan_device",
         default=None,
-        help="TTS.cpp sidecar/native binding に渡す TTS_DEVICE の値です。",
+        help="TTS.cpp sidecar/native binding に渡す TTS_DEVICE の値です。Vulkan/Metal のデバイス選択に使います。",
     )
     parser.add_argument(
         "--ggml_vulkan_precision",

@@ -9,6 +9,7 @@ from tools.benchmark_style_bert_vits2_ggml_vulkan import (
     _BenchmarkRecord,
     _build_benchmark_profile,
     _evaluate_performance_gates,
+    _extract_metal_device_log_evidence,
     _extract_tts_cpp_style_bert_timings,
     _extract_vulkan_device_log_evidence,
     _GgmlBackendSpec,
@@ -166,9 +167,7 @@ def test_summarize_backend_timings_by_text_reports_payload_overhead() -> None:
     assert short_summary["mean_bert_binary_bytes"] == pytest.approx(50_000)
     assert short_summary["mean_bert_payload_bytes"] == pytest.approx(66_668)
     assert short_summary["mean_numeric_payload_bytes"] == pytest.approx(67_100)
-    assert short_summary["mean_request_json_to_bert_binary_ratio"] == pytest.approx(
-        8.2
-    )
+    assert short_summary["mean_request_json_to_bert_binary_ratio"] == pytest.approx(8.2)
     assert short_summary["mean_sidecar_http_seconds"] == pytest.approx(0.23)
     assert "mean_jp_bert_http_seconds" not in short_summary
 
@@ -372,6 +371,39 @@ def test_evaluate_performance_gates_reports_per_text_rtf_failure() -> None:
     )
 
 
+def test_evaluate_performance_gates_checks_ggml_metal_records() -> None:
+    """Metal benchmark records are covered by the existing ggml gate options."""
+
+    records = [
+        _record(
+            backend="onnx-cpu",
+            text="short",
+            elapsed_seconds=0.4,
+            output_duration_seconds=1.0,
+            rtf=0.4,
+        ),
+        _record(
+            backend="ggml-metal",
+            text="short",
+            elapsed_seconds=0.2,
+            output_duration_seconds=1.0,
+            rtf=0.2,
+        ),
+    ]
+
+    gates = _evaluate_performance_gates(
+        records,
+        ggml_vulkan_mean_rtf_at_most=0.3,
+        ggml_vulkan_per_text_rtf_at_most=None,
+        ggml_vulkan_mean_rtf_ratio_vs_onnx_cpu_at_most=0.75,
+        ggml_vulkan_per_text_rtf_ratio_vs_onnx_cpu_at_most=None,
+    )
+
+    assert gates["enabled"] is True
+    assert gates["violations"] == []
+    assert {check["backend"] for check in gates["checks"]} == {"ggml-metal"}
+
+
 def test_parse_ggml_backend_specs_keeps_default_vulkan_name_compatible() -> None:
     """The default accurate Vulkan run keeps the historical backend label."""
 
@@ -414,9 +446,7 @@ def test_parse_onnx_baseline_specs_defaults_to_cpu() -> None:
 def test_parse_onnx_baseline_specs_can_include_cuda() -> None:
     """The benchmark can compare ONNX CPU and CUDA baselines."""
 
-    specs = _parse_onnx_baseline_specs(
-        Namespace(onnx_baseline=["cpu", "cuda"])
-    )
+    specs = _parse_onnx_baseline_specs(Namespace(onnx_baseline=["cpu", "cuda"]))
 
     assert [spec.name for spec in specs] == ["onnx-cpu", "onnx-cuda"]
     assert [spec.use_gpu for spec in specs] == [False, True]
@@ -486,6 +516,41 @@ def test_parse_ggml_backend_specs_expands_vulkan_precision_matrix(
         "fast",
     ]
     assert [spec.vulkan_precision for spec in specs[4:]] == [None, None]
+
+
+def test_parse_ggml_backend_specs_expands_metal_backend(
+    tmp_path: Path,
+) -> None:
+    """Metal runs are labeled separately from Vulkan and CPU runs."""
+
+    jp_bert_gguf_path = tmp_path / "jp-bert.gguf"
+    specs = _parse_ggml_backend_specs(
+        Namespace(
+            ggml_backend=["metal", "cpu"],
+            ggml_frontend=["onnx-bert", "tts-cpp-jp-bert"],
+            ggml_synthesis_endpoint=None,
+            ggml_vulkan_precision=["accurate", "fast"],
+            jp_bert_gguf_path=jp_bert_gguf_path,
+            expect_sidecar_log_contains="Apple M2",
+            expect_cpu_sidecar_log_contains=None,
+            ggml_debug_timings=True,
+        )
+    )
+
+    assert [spec.name for spec in specs] == [
+        "ggml-metal",
+        "ggml-metal-jp-bert",
+        "ggml-cpu",
+        "ggml-cpu-jp-bert",
+    ]
+    assert [spec.tts_cpp_backend for spec in specs] == [
+        "metal",
+        "metal",
+        "cpu",
+        "cpu",
+    ]
+    assert [spec.vulkan_precision for spec in specs] == [None, None, None, None]
+    assert specs[0].expected_log_text == "Apple M2"
 
 
 def test_parse_ggml_backend_specs_expands_synthesis_endpoint_matrix() -> None:
@@ -573,6 +638,18 @@ def test_extract_vulkan_device_log_evidence_ignores_launch_command() -> None:
     assert evidence == []
 
 
+def test_extract_metal_device_log_evidence_ignores_launch_command() -> None:
+    """The managed sidecar command line alone is not proof of Metal execution."""
+
+    evidence = _extract_metal_device_log_evidence(
+        "[2026-06-24 00:00:00] Starting TTS.cpp sidecar: tts-server --backend metal\n"
+        "STYLE_BERT_VITS2_TIMING phase=decoder backend=Metal0 total_ms=1\n"
+        "INFO: server is ready\n"
+    )
+
+    assert evidence == []
+
+
 def test_read_sidecar_diagnostics_requires_vulkan_device_evidence(
     tmp_path: Path,
 ) -> None:
@@ -623,6 +700,66 @@ def test_read_sidecar_diagnostics_records_vulkan_device_evidence(
         "ggml_vulkan: Found 1 Vulkan devices:",
         "ggml_vulkan: 0 = AMD Radeon 780M Graphics (RADV PHOENIX)",
     ]
+    assert diagnostics["accelerator_device_evidence"] == [
+        "ggml_vulkan: Found 1 Vulkan devices:",
+        "ggml_vulkan: 0 = AMD Radeon 780M Graphics (RADV PHOENIX)",
+    ]
+
+
+def test_read_sidecar_diagnostics_requires_metal_device_evidence(
+    tmp_path: Path,
+) -> None:
+    """Metal benchmark runs fail when the sidecar log lacks device evidence."""
+
+    log_path = tmp_path / "tts-cpp-sidecar.log"
+    log_path.write_text("INFO: server is ready\n", encoding="utf-8")
+    spec = _GgmlBackendSpec(
+        name="ggml-metal",
+        tts_cpp_backend="metal",
+        vulkan_precision=None,
+        use_tts_cpp_jp_bert=False,
+        synthesis_endpoint="synthesize-front",
+        expected_log_text=None,
+        require_style_bert_timings=False,
+    )
+
+    with pytest.raises(RuntimeError, match="Metal device evidence"):
+        _read_sidecar_diagnostics(spec=spec, log_path=log_path)
+
+
+def test_read_sidecar_diagnostics_records_metal_device_evidence(
+    tmp_path: Path,
+) -> None:
+    """Metal device lines are stored in benchmark JSON diagnostics."""
+
+    log_path = tmp_path / "tts-cpp-sidecar.log"
+    log_path.write_text(
+        "ggml_metal_init: found device: Apple M2 Max\n"
+        "ggml_metal_device_init: GPU name:   Apple M2 Max (Apple8)\n",
+        encoding="utf-8",
+    )
+    spec = _GgmlBackendSpec(
+        name="ggml-metal",
+        tts_cpp_backend="metal",
+        vulkan_precision=None,
+        use_tts_cpp_jp_bert=False,
+        synthesis_endpoint="synthesize-front",
+        expected_log_text="Apple M2 Max",
+        require_style_bert_timings=False,
+    )
+
+    diagnostics = _read_sidecar_diagnostics(spec=spec, log_path=log_path)
+
+    assert diagnostics["log_path"] == str(log_path)
+    assert diagnostics["expected_log_text"] == "Apple M2 Max"
+    assert diagnostics["metal_device_evidence"] == [
+        "ggml_metal_init: found device: Apple M2 Max",
+        "ggml_metal_device_init: GPU name:   Apple M2 Max (Apple8)",
+    ]
+    assert diagnostics["accelerator_device_evidence"] == [
+        "ggml_metal_init: found device: Apple M2 Max",
+        "ggml_metal_device_init: GPU name:   Apple M2 Max (Apple8)",
+    ]
 
 
 def test_read_sidecar_diagnostics_does_not_require_device_evidence_for_cpu(
@@ -645,6 +782,8 @@ def test_read_sidecar_diagnostics_does_not_require_device_evidence_for_cpu(
     diagnostics = _read_sidecar_diagnostics(spec=spec, log_path=log_path)
 
     assert diagnostics["vulkan_device_evidence"] == []
+    assert diagnostics["metal_device_evidence"] == []
+    assert diagnostics["accelerator_device_evidence"] == []
 
 
 def test_extract_tts_cpp_style_bert_timings_summarizes_graph_events() -> None:
