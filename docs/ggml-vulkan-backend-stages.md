@@ -538,6 +538,15 @@ for the 2026-06-24 short/medium/long RTF comparison across ONNX CPU, ONNX CUDA,
 ggml Vulkan AMD 780M iGPU, and ggml Vulkan RTX 3060, plus the 2026-06-25 macOS
 Metal native binding result on Apple M1 Pro.
 
+The same benchmark document also records the 2026-06-25 local TTS.cpp Vulkan
+fused ConvTranspose1D exploration based on TTS.cpp `8e26ac0` / ggml `b6ad57d8`.
+That unmerged local patch reduced AMD 780M native Vulkan overall RTF from
+`0.1775` to `0.1559` with the f32 `phase_k64` selector. On RTX 3060, the fused
+op improved overall RTF from `0.1040` to `0.0980`, but the AOT selector was not
+the best default. Both measured Vulkan devices reported `matrix cores: none`, so
+the Metal simdgroup-half strategy is documented as inspiration, not as the Linux
+Vulkan default route.
+
 Performance interpretation guardrails:
 
 - The TTS.cpp unsupported-route fix for generic `/v1/audio/speech` is a stability and integration correctness change, not a synthesis performance optimization. It prevents Style-Bert-VITS2 requests from aborting the server when the wrong generic route is used.

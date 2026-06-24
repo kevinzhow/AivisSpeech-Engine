@@ -99,6 +99,75 @@ interleaved ffmpeg AAC encoding disturbing the APU benchmark, not from the Vulka
 synthesis path. The benchmark harness now queues AAC artifacts and encodes them
 after a backend's measured synthesis loop.
 
+## Experimental Vulkan Fused ConvTranspose1D Result
+
+This 2026-06-25 exploration pulled TTS.cpp to `8e26ac0` (`Default Style-Bert
+Metal to simdgroup AOT conv transpose`) and ggml to `b6ad57d8` (`Add Style-Bert
+simdgroup AOT conv transpose`). The checked-out TTS.cpp tree then carried a
+local unmerged Vulkan patch that ports the useful non-Metal parts of that work:
+
+- `STYLE_BERT_VITS2_VULKAN_FUSED_CONV_TRANSPOSE_1D=1` enables a fused
+  `pre_relu + ConvTranspose1D + crop + bias` Vulkan op.
+- `STYLE_BERT_VITS2_VULKAN_FUSED_UPSAMPLE_PRE_RELU=1` folds the upsample
+  block's pre-relu into that fused op.
+- `STYLE_BERT_VITS2_VULKAN_CONV_TRANSPOSE_1D_KERNEL` selects `scalar`,
+  `phase_k64`, `phase_k128`, or `aot`.
+
+The Metal half/simdgroup matrix idea should not be copied directly to these
+Linux Vulkan devices yet. TTS.cpp reported no usable fp16 or matrix-core path on
+either measured GPU:
+
+```text
+ggml_vulkan: 0 = AMD Radeon 780M Graphics (RADV PHOENIX) (radv) | uma: 1 | fp16: 0 | bf16: 0 | warp size: 64 | shared memory: 65536 | int dot: 1 | matrix cores: none
+ggml_vulkan: 0 = NVIDIA GeForce RTX 3060 (NVIDIA) | uma: 0 | fp16: 0 | bf16: 1 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: none
+```
+
+RTF results, same text set and `warm_steady_state` profile:
+
+| device | Vulkan ConvTranspose1D path | overall RTF | short RTF | medium RTF | long RTF |
+| --- | --- | ---: | ---: | ---: | ---: |
+| AMD 780M | upstream baseline, no local fused patch | `0.1775` | `0.2181` | `0.1854` | `0.1290` |
+| AMD 780M | `scalar` fused | `0.1677` | `0.2076` | `0.1711` | `0.1245` |
+| AMD 780M | `phase_k64` fused | `0.1559` | `0.1993` | `0.1590` | `0.1093` |
+| AMD 780M | `aot` fused | `0.1560` | `0.1990` | `0.1591` | `0.1101` |
+| RTX 3060 | upstream baseline, no local fused patch | `0.1040` | `0.1471` | `0.1015` | `0.0635` |
+| RTX 3060 | `scalar` fused | `0.0980` | `0.1415` | `0.0954` | `0.0571` |
+| RTX 3060 | `aot` fused | `0.0988` | `0.1420` | `0.0979` | `0.0565` |
+
+Interpretation:
+
+- AMD 780M benefits most from the f32 phase-tiled path. `phase_k64` reduces
+  overall RTF from `0.1775` to `0.1559`, a `12.2%` improvement, and reduces the
+  long-text RTF from `0.1290` to `0.1093`, a `15.3%` improvement.
+- On RTX 3060, the fused op itself helps, but `aot` is not the best default in
+  this local run. Keep `scalar` as the safer NVIDIA Vulkan selector until a
+  separate NVIDIA-specific shader strategy is proven.
+- The five AOT shape-specialized Vulkan pipelines compile and run, but on AMD
+  780M they are effectively tied with generic `phase_k64`, and on RTX 3060 they
+  are slightly slower overall than `scalar`.
+
+Decoder fixture parity stayed within the existing deterministic tolerance:
+
+| device/path | decoder output max_abs | decoder output rms |
+| --- | ---: | ---: |
+| AMD 780M `phase_k64` / `aot` | `0.00140219` | `8.28174e-05` |
+| RTX 3060 `aot` | `0.00113783` | `7.45232e-05` |
+
+Artifacts:
+
+- AMD baseline:
+  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage1/amd780m.json`
+- AMD fused selector matrix:
+  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage3/rtf-*.json`
+- RTX 3060 fused selector matrix:
+  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage4/rtx3060-rtf-*.json`
+- AOT pipeline proof:
+  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage3/backend-compare-aot-pipeline-stats.log`
+- Decoder fixture parity:
+  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage3/backend-compare-aot.log`
+  and
+  `/tmp/aivis-style-bert-vits2-vulkan-explore-20260625-stage4/backend-compare-rtx3060-aot.log`
+
 ## Linux Vulkan Audio Preview
 
 Each preview is the `run00` AAC artifact for that backend and text. These
@@ -344,6 +413,18 @@ hf download kevinzhow/style-bert-vits2-gguf \
 If the GGUF needs to be rebuilt from source, use TTS.cpp's
 `py-gguf/convert_style_bert_vits2_to_gguf` or the Engine's `AivmGgufCache`.
 For normal benchmark reproduction, use the preconverted HF artifacts above.
+
+Experimental local Vulkan fused ConvTranspose1D runs require the local TTS.cpp
+patch described above. Add these environment variables to the Vulkan command:
+
+```bash
+STYLE_BERT_VITS2_VULKAN_FUSED_CONV_TRANSPOSE_1D=1 \
+STYLE_BERT_VITS2_VULKAN_FUSED_UPSAMPLE_PRE_RELU=1 \
+STYLE_BERT_VITS2_VULKAN_CONV_TRANSPOSE_1D_KERNEL=phase_k64 \
+```
+
+Use `phase_k64` for the AMD 780M iGPU result. Use `scalar` for the RTX 3060
+result unless a newer NVIDIA-specific shader path has been benchmarked.
 
 AMD 780M iGPU RTF run:
 
