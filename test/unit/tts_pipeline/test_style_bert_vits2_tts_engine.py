@@ -193,6 +193,41 @@ class _FailingManagedSidecarForLoadTest:
         return
 
 
+class _NativeBindingForGgmlTest:
+    """TTS.cpp native binding double for ggml backend unit tests."""
+
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(library_path=Path("/tmp/libtts.so"))
+        self.synthesize_front_calls: list[dict[str, Any]] = []
+        self.encode_jp_bert_features_calls: list[dict[str, Any]] = []
+
+    def synthesize_front(self, native_model: Any, **kwargs: Any) -> tuple[int, Any, float]:
+        self.synthesize_front_calls.append(
+            {
+                "native_model": native_model,
+                **kwargs,
+            }
+        )
+        return 48000, np.array([10, -20, 30], dtype=np.int16), 0.123
+
+    def encode_jp_bert_features(
+        self,
+        native_model: Any,
+        input_ids: NDArray[Any],
+    ) -> tuple[NDArray[Any], float]:
+        self.encode_jp_bert_features_calls.append(
+            {
+                "native_model": native_model,
+                "input_ids": np.array(input_ids, copy=True),
+            }
+        )
+        features = np.arange(input_ids.size * 4, dtype=np.float32).reshape(
+            input_ids.size,
+            4,
+        )
+        return features, 0.045
+
+
 class _AivmManagerForGgmlLoadTest:
     """Minimal AivmManager double for ggml load-model tests."""
 
@@ -766,6 +801,126 @@ def test_ggml_vulkan_backend_posts_synthesize_front_payload(
     assert timings.symbol_count is None
     assert timings.sidecar_http_seconds >= 0.0
     assert timings.jp_bert_http_seconds is None
+
+
+def test_ggml_vulkan_backend_can_synthesize_with_native_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """native binding 利用時は HTTP payload を作らず C API に配列を渡す。"""
+
+    def fake_get_text_onnx(**_kwargs: Any) -> tuple[Any, Any, Any, Any, Any, Any]:
+        return (
+            np.zeros((1024, 2), dtype=np.float32),
+            np.arange(2048, dtype=np.float32).reshape(1024, 2),
+            np.zeros((1024, 2), dtype=np.float32),
+            np.array([10, 11], dtype=np.int64),
+            np.array([20, 21], dtype=np.int64),
+            np.array([30, 31], dtype=np.int64),
+        )
+
+    monkeypatch.setattr(style_bert_vits2_backend, "get_text_onnx", fake_get_text_onnx)
+    native_binding = _NativeBindingForGgmlTest()
+    native_model = object()
+    backend = GgmlVulkanStyleBertVITS2Backend(
+        aivm_manager=cast(AivmManager, object()),
+        onnx_providers=[],
+        server_url="http://127.0.0.1:18080/",
+        native_binding=cast(Any, native_binding),
+        allow_nonzero_sdp=True,
+    )
+    model = GgmlStyleBertVITS2Model(
+        model_name="style-model",
+        gguf_path=None,
+        hyper_parameters=cast(Any, object()),
+        native_model=cast(Any, native_model),
+    )
+    request = StyleBertVITS2SynthesisRequest(
+        text="テスト",
+        given_phone=["_", "t", "e", "_"],
+        given_tone=[0, 0, 0, 0],
+        language=Languages.JP,
+        speaker_id=2,
+        style="ノーマル",
+        style_id=3,
+        style_weight=4.0,
+        sdp_ratio=0.5,
+        length=1.25,
+        pitch_scale=1.0,
+    )
+
+    sample_rate, wave = backend.synthesize(model, request)
+
+    assert sample_rate == 48000
+    assert np.array_equal(wave, np.array([10, -20, 30], dtype=np.int16))
+    assert len(native_binding.synthesize_front_calls) == 1
+    native_call = native_binding.synthesize_front_calls[0]
+    assert native_call["native_model"] is native_model
+    assert np.array_equal(native_call["phone_ids"], np.array([10, 11], dtype=np.int32))
+    assert np.array_equal(native_call["tone_ids"], np.array([20, 21], dtype=np.int32))
+    assert np.array_equal(
+        native_call["language_ids"],
+        np.array([30, 31], dtype=np.int32),
+    )
+    assert native_call["bert"].dtype == np.float32
+    assert native_call["bert"][:4].tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert native_call["speaker_id"] == 2
+    assert native_call["style_id"] == 3
+    assert native_call["style_weight"] == pytest.approx(4.0)
+    assert native_call["sdp_ratio"] == pytest.approx(0.5)
+    assert native_call["length_scale"] == pytest.approx(1.25)
+    timings = backend.last_synthesis_timings
+    assert timings is not None
+    assert timings.transport == "native-binding"
+    assert timings.frontend_mode == "onnx-bert"
+    assert timings.synthesis_endpoint == "synthesize-front"
+    assert timings.request_json_bytes == 0
+    assert timings.wav_decode_seconds == 0.0
+    assert timings.sidecar_http_seconds == pytest.approx(0.123)
+    assert timings.native_synthesis_seconds == pytest.approx(0.123)
+    assert timings.bert_payload_format == "native-f32"
+    assert timings.bert_payload_bytes == 2048 * 4
+    assert timings.native_jp_bert_seconds is None
+
+
+def test_ggml_vulkan_backend_native_jp_bert_features_record_native_timings() -> None:
+    """native binding 利用時は JP-BERT 特徴量も C API から取得する。"""
+
+    native_binding = _NativeBindingForGgmlTest()
+    native_model = object()
+    backend = GgmlVulkanStyleBertVITS2Backend(
+        aivm_manager=cast(AivmManager, object()),
+        onnx_providers=[],
+        server_url="http://127.0.0.1:18080/",
+        native_binding=cast(Any, native_binding),
+    )
+    model = GgmlStyleBertVITS2Model(
+        model_name="style-model",
+        gguf_path=None,
+        hyper_parameters=cast(Any, object()),
+        native_model=cast(Any, native_model),
+    )
+
+    features = backend._extract_tts_cpp_jp_bert_features(  # noqa: SLF001
+        model=model,
+        input_ids=[101, 102, 103],
+    )
+
+    assert features.shape == (3, 4)
+    assert features.dtype == np.float32
+    assert len(native_binding.encode_jp_bert_features_calls) == 1
+    native_call = native_binding.encode_jp_bert_features_calls[0]
+    assert native_call["native_model"] is native_model
+    assert np.array_equal(
+        native_call["input_ids"],
+        np.array([101, 102, 103], dtype=np.int32),
+    )
+    timings = backend._last_jp_bert_feature_timings  # noqa: SLF001
+    assert timings is not None
+    assert timings.transport == "native-binding"
+    assert timings.request_json_bytes == 0
+    assert timings.response_json_bytes == features.nbytes
+    assert timings.http_seconds == pytest.approx(0.045)
+    assert timings.json_decode_seconds == 0.0
 
 
 def test_ggml_vulkan_backend_can_use_json_array_bert_payload(
@@ -1415,6 +1570,25 @@ def test_ggml_vulkan_backend_exposes_runtime_diagnostics(tmp_path: Path) -> None
     assert sidecar_status["vulkan_precision"] == "fast"
     assert sidecar_status["debug_timings"] is True
     assert sidecar_status["running"] is False
+
+
+def test_ggml_vulkan_backend_exposes_native_binding_diagnostics() -> None:
+    """native binding 利用時は diagnostics に共有ライブラリのパスを出す。"""
+
+    native_binding = _NativeBindingForGgmlTest()
+    backend = GgmlVulkanStyleBertVITS2Backend(
+        aivm_manager=cast(AivmManager, object()),
+        onnx_providers=[],
+        server_url="http://127.0.0.1:18080",
+        native_binding=cast(Any, native_binding),
+    )
+
+    diagnostics = backend.diagnostics
+
+    assert diagnostics["managed_sidecar"] is False
+    assert diagnostics["native_binding"] is True
+    assert diagnostics["native_library_path"] == "/tmp/libtts.so"
+    assert diagnostics["managed_sidecar_status"] is None
 
 
 def test_onnx_backend_prefers_same_uuid_aivmx_when_registered_path_is_aivm(

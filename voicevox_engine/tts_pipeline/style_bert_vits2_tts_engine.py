@@ -48,6 +48,10 @@ from ..tts_pipeline.style_bert_vits2_backend import (
     StyleBertVITS2Backend,
     StyleBertVITS2SynthesisRequest,
 )
+from ..tts_pipeline.tts_cpp_native import (
+    TtsCppNativeBinding,
+    TtsCppNativeRuntimeConfig,
+)
 from ..tts_pipeline.tts_cpp_sidecar import ManagedTtsCppSidecar
 from ..tts_pipeline.tts_engine import (
     TTSEngine,
@@ -109,6 +113,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         ggml_bert_payload_format: str = "base64",
         ggml_tts_server_debug_timings: bool = False,
         ggml_tts_server_log_path: Path | None = None,
+        ggml_native_library_path: Path | None = None,
     ) -> None:
         self.aivm_manager = aivm_manager
         self.use_gpu = use_gpu
@@ -195,9 +200,14 @@ class StyleBertVITS2TTSEngine(TTSEngine):
                 if ggml_tts_server_backend == "cpu"
                 else "ggml-vulkan"
             )
-            logger.info(
-                f"Using TTS.cpp ggml/Vulkan sidecar backend at {ggml_vulkan_server_url}."
-            )
+            if ggml_native_library_path is not None:
+                logger.info(
+                    f"Using TTS.cpp ggml/Vulkan native binding at {ggml_native_library_path}."
+                )
+            else:
+                logger.info(
+                    f"Using TTS.cpp ggml/Vulkan sidecar backend at {ggml_vulkan_server_url}."
+                )
             gguf_cache = (
                 AivmGgufCache(
                     cache_dir=ggml_model_cache_dir,
@@ -218,6 +228,20 @@ class StyleBertVITS2TTSEngine(TTSEngine):
                     log_path=ggml_tts_server_log_path,
                 )
                 if ggml_tts_server_path is not None
+                and ggml_native_library_path is None
+                else None
+            )
+            native_binding = (
+                TtsCppNativeBinding(
+                    TtsCppNativeRuntimeConfig(
+                        library_path=ggml_native_library_path,
+                        backend=ggml_tts_server_backend,
+                        device=ggml_vulkan_device,
+                        vulkan_precision=ggml_vulkan_precision,
+                        strict=ggml_vulkan_strict,
+                    )
+                )
+                if ggml_native_library_path is not None
                 else None
             )
             ggml_backend = GgmlVulkanStyleBertVITS2Backend(
@@ -228,6 +252,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
                 jp_bert_model_name=ggml_jp_bert_model,
                 gguf_cache=gguf_cache,
                 managed_sidecar=managed_sidecar,
+                native_binding=native_binding,
                 tts_cpp_backend=ggml_tts_server_backend,
                 managed_model_path=ggml_model_path,
                 allow_nonzero_sdp=ggml_vulkan_allow_nonzero_sdp,

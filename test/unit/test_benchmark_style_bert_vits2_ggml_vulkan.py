@@ -460,6 +460,53 @@ def test_parse_ggml_backend_specs_expands_synthesis_endpoint_matrix() -> None:
     ]
 
 
+def test_parse_ggml_backend_specs_marks_native_binding_transport(
+    tmp_path: Path,
+) -> None:
+    """native binding benchmark specs are labeled separately from sidecar runs."""
+
+    specs = _parse_ggml_backend_specs(
+        Namespace(
+            ggml_backend=["vulkan"],
+            ggml_frontend=["tts-cpp-jp-bert"],
+            ggml_synthesis_endpoint=["synthesize-front"],
+            ggml_vulkan_precision=["accurate"],
+            jp_bert_gguf_path=tmp_path / "jp-bert.gguf",
+            expect_sidecar_log_contains="AMD Radeon",
+            expect_cpu_sidecar_log_contains=None,
+            ggml_debug_timings=True,
+            ggml_native_library_path=tmp_path / "libtts.so",
+        )
+    )
+
+    assert len(specs) == 1
+    assert specs[0].name == "ggml-vulkan-jp-bert-native"
+    assert specs[0].transport == "native-binding"
+    assert specs[0].expected_log_text is None
+    assert specs[0].require_style_bert_timings is False
+
+
+def test_parse_ggml_backend_specs_rejects_native_binding_symbols_endpoint(
+    tmp_path: Path,
+) -> None:
+    """native binding is currently synthesize-front only."""
+
+    with pytest.raises(ValueError, match="synthesize-front"):
+        _parse_ggml_backend_specs(
+            Namespace(
+                ggml_backend=["vulkan"],
+                ggml_frontend=["onnx-bert"],
+                ggml_synthesis_endpoint=["synthesize-symbols"],
+                ggml_vulkan_precision=["accurate"],
+                jp_bert_gguf_path=None,
+                expect_sidecar_log_contains=None,
+                expect_cpu_sidecar_log_contains=None,
+                ggml_debug_timings=False,
+                ggml_native_library_path=tmp_path / "libtts.so",
+            )
+        )
+
+
 def test_extract_vulkan_device_log_evidence_ignores_launch_command() -> None:
     """The managed sidecar command line alone is not proof of Vulkan execution."""
 

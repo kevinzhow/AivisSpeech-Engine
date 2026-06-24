@@ -32,6 +32,11 @@ from voicevox_engine.aivm_gguf_cache import AivmGgufCache
 from voicevox_engine.aivm_manager import AivmManager
 from voicevox_engine.aivm_metadata import read_aivm_metadata_from_path
 from voicevox_engine.logging import logger
+from voicevox_engine.tts_pipeline.tts_cpp_native import (
+    TtsCppNativeBinding,
+    TtsCppNativeBindingError,
+    TtsCppNativeStyleBertVITS2Model,
+)
 from voicevox_engine.tts_pipeline.tts_cpp_sidecar import ManagedTtsCppSidecar
 
 _SUPPORTED_GGML_MODEL_ARCHITECTURES = (
@@ -120,6 +125,7 @@ class _GgmlJpBertFeatureTimings:
     response_json_bytes: int
     http_seconds: float
     json_decode_seconds: float
+    transport: str = "sidecar-http"
 
 
 @dataclass(frozen=True)
@@ -134,8 +140,9 @@ class _GgmlSynthesisPayload:
 
 @dataclass(frozen=True)
 class GgmlSidecarSynthesisTimings:
-    """Structured timing data for one TTS.cpp sidecar synthesis request."""
+    """Structured timing data for one TTS.cpp ggml synthesis request."""
 
+    transport: str
     frontend_mode: str
     synthesis_endpoint: str
     frontend_seconds: float
@@ -158,11 +165,14 @@ class GgmlSidecarSynthesisTimings:
     jp_bert_response_json_bytes: int | None = None
     jp_bert_http_seconds: float | None = None
     jp_bert_json_decode_seconds: float | None = None
+    native_synthesis_seconds: float | None = None
+    native_jp_bert_seconds: float | None = None
 
     def to_record(self) -> dict[str, float | int | str | None]:
         """Return a JSON-serializable benchmark record."""
 
         return {
+            "transport": self.transport,
             "frontend_mode": self.frontend_mode,
             "synthesis_endpoint": self.synthesis_endpoint,
             "frontend_seconds": self.frontend_seconds,
@@ -187,6 +197,8 @@ class GgmlSidecarSynthesisTimings:
             "jp_bert_response_json_bytes": self.jp_bert_response_json_bytes,
             "jp_bert_http_seconds": self.jp_bert_http_seconds,
             "jp_bert_json_decode_seconds": self.jp_bert_json_decode_seconds,
+            "native_synthesis_seconds": self.native_synthesis_seconds,
+            "native_jp_bert_seconds": self.native_jp_bert_seconds,
         }
 
 
@@ -365,15 +377,16 @@ class OnnxStyleBertVITS2Backend:
 
 @dataclass(frozen=True)
 class GgmlStyleBertVITS2Model:
-    """Model metadata required by the TTS.cpp sidecar backend."""
+    """Model metadata required by the TTS.cpp ggml backend."""
 
     model_name: str | None
     gguf_path: Path | None
     hyper_parameters: HyperParameters
+    native_model: TtsCppNativeStyleBertVITS2Model | None = None
 
 
 class GgmlVulkanStyleBertVITS2Backend:
-    """TTS.cpp sidecar-backed Style-Bert-VITS2 implementation."""
+    """TTS.cpp ggml-backed Style-Bert-VITS2 implementation."""
 
     def __init__(
         self,
@@ -384,6 +397,7 @@ class GgmlVulkanStyleBertVITS2Backend:
         jp_bert_model_name: str | None = None,
         gguf_cache: AivmGgufCache | None = None,
         managed_sidecar: ManagedTtsCppSidecar | None = None,
+        native_binding: TtsCppNativeBinding | None = None,
         tts_cpp_backend: str = "vulkan",
         managed_model_path: Path | None = None,
         allow_nonzero_sdp: bool = False,
@@ -397,6 +411,10 @@ class GgmlVulkanStyleBertVITS2Backend:
             raise ValueError(
                 f"Unsupported ggml BERT payload format: {bert_payload_format}"
             )
+        if native_binding is not None and synthesis_endpoint != "synthesize-front":
+            raise ValueError(
+                "TTS.cpp native binding currently supports only synthesize-front."
+            )
         self._aivm_manager = aivm_manager
         self._onnx_providers = onnx_providers
         self._server_url = server_url.rstrip("/")
@@ -404,6 +422,7 @@ class GgmlVulkanStyleBertVITS2Backend:
         self._jp_bert_model_name = jp_bert_model_name
         self._gguf_cache = gguf_cache
         self._managed_sidecar = managed_sidecar
+        self._native_binding = native_binding
         self._tts_cpp_backend = tts_cpp_backend
         self._managed_model_path = managed_model_path
         self._allow_nonzero_sdp = allow_nonzero_sdp
@@ -417,13 +436,13 @@ class GgmlVulkanStyleBertVITS2Backend:
 
     @property
     def last_synthesis_timings(self) -> GgmlSidecarSynthesisTimings | None:
-        """Return structured timings from the latest successful sidecar request."""
+        """Return structured timings from the latest successful ggml request."""
 
         return self._last_synthesis_timings
 
     @property
     def diagnostics(self) -> dict[str, Any]:
-        """Return structured runtime diagnostics for the ggml sidecar backend."""
+        """Return structured runtime diagnostics for the ggml backend."""
 
         with self._models_lock:
             loaded_model_uuids = sorted(self._models.keys())
@@ -439,6 +458,12 @@ class GgmlVulkanStyleBertVITS2Backend:
             "model_name": self._model_name,
             "jp_bert_model_name": self._jp_bert_model_name,
             "managed_sidecar": self._managed_sidecar is not None,
+            "native_binding": self._native_binding is not None,
+            "native_library_path": (
+                str(self._native_binding.config.library_path)
+                if self._native_binding is not None
+                else None
+            ),
             "managed_model_path": (
                 str(self._managed_model_path)
                 if self._managed_model_path is not None
@@ -462,7 +487,7 @@ class GgmlVulkanStyleBertVITS2Backend:
         }
 
     def load_model(self, aivm_model_uuid: str) -> GgmlStyleBertVITS2Model:
-        """Load model metadata for an already-running TTS.cpp sidecar model."""
+        """Load model metadata and optional native handles for TTS.cpp ggml."""
 
         with self._models_lock:
             if aivm_model_uuid in self._models:
@@ -533,21 +558,102 @@ class GgmlVulkanStyleBertVITS2Backend:
                     detail=f"Failed to start managed TTS.cpp sidecar: {ex}",
                 ) from ex
 
+        native_model: TtsCppNativeStyleBertVITS2Model | None = None
+        if self._native_binding is not None:
+            synthesis_model_path = self._resolve_native_model_path(
+                gguf_path=gguf_path,
+                model_name=model_name,
+                model_kind="synthesis",
+            )
+            jp_bert_model_path = (
+                self._resolve_native_model_path(
+                    gguf_path=None,
+                    model_name=self._jp_bert_model_name,
+                    model_kind="JP-BERT",
+                )
+                if self._jp_bert_model_name is not None
+                else None
+            )
+            try:
+                native_model = self._native_binding.load_model(
+                    synthesis_model_path=synthesis_model_path,
+                    jp_bert_model_path=jp_bert_model_path,
+                )
+            except TtsCppNativeBindingError as ex:
+                logger.error("Failed to load TTS.cpp native binding models.", exc_info=ex)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to load TTS.cpp native binding models: {ex}",
+                ) from ex
+
         model = GgmlStyleBertVITS2Model(
             model_name=model_name,
             gguf_path=gguf_path,
             hyper_parameters=HyperParameters.model_validate(
                 aivm_metadata.hyper_parameters.model_dump()
             ),
+            native_model=native_model,
         )
-        self._validate_sidecar_model(model)
+        if self._native_binding is None:
+            self._validate_sidecar_model(model)
         with self._models_lock:
             self._models[aivm_model_uuid] = model
         self._aivm_manager.update_model_load_state(aivm_model_uuid, is_loaded=True)
+        transport_label = (
+            "native binding" if self._native_binding is not None else "sidecar"
+        )
         logger.info(
-            f"{aivm_info.manifest.name} ({aivm_model_uuid}) registered for ggml/Vulkan sidecar inference."
+            "%s (%s) registered for ggml/Vulkan %s inference.",
+            aivm_info.manifest.name,
+            aivm_model_uuid,
+            transport_label,
         )
         return model
+
+    def _resolve_native_model_path(
+        self,
+        *,
+        gguf_path: Path | None,
+        model_name: str | None,
+        model_kind: str,
+    ) -> Path:
+        """Resolve a concrete GGUF file path for the native C API."""
+
+        if gguf_path is not None:
+            return gguf_path
+        if self._managed_model_path is None:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"TTS.cpp native binding requires a GGUF cache entry or "
+                    f"--ggml_model_path for {model_kind}."
+                ),
+            )
+        if self._managed_model_path.is_file():
+            if model_kind != "synthesis":
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"TTS.cpp native binding requires a GGUF directory "
+                        f"for {model_kind}."
+                    ),
+                )
+            return self._managed_model_path
+        if model_name is None:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"TTS.cpp native binding requires a model name when "
+                    f"--ggml_model_path is a directory for {model_kind}."
+                ),
+            )
+        model_path = self._managed_model_path / f"{model_name}.gguf"
+        if not model_path.exists():
+            raise HTTPException(
+                status_code=500,
+                detail=f"TTS.cpp native binding model file does not exist: {model_path}",
+            )
+        return model_path
 
     def _validate_supported_metadata_for_ggml(
         self,
@@ -620,14 +726,20 @@ class GgmlVulkanStyleBertVITS2Backend:
             raise HTTPException(status_code=500, detail=detail)
 
     def unload_model(self, aivm_model_uuid: str) -> None:
-        """Unload local sidecar metadata. The external TTS.cpp server owns GGUF memory."""
+        """Unload local ggml metadata and release native handles when present."""
 
         with self._models_lock:
-            self._models.pop(aivm_model_uuid, None)
+            model = self._models.pop(aivm_model_uuid, None)
+        if (
+            model is not None
+            and model.native_model is not None
+            and self._native_binding is not None
+        ):
+            self._native_binding.free_model(model.native_model)
         self._aivm_manager.update_model_load_state(aivm_model_uuid, is_loaded=False)
 
     def is_model_loaded(self, aivm_model_uuid: str) -> bool:
-        """Return whether local sidecar metadata is loaded."""
+        """Return whether local ggml metadata is loaded."""
 
         with self._models_lock:
             return aivm_model_uuid in self._models
@@ -668,6 +780,13 @@ class GgmlVulkanStyleBertVITS2Backend:
             request=request,
         )
         frontend_elapsed = time.perf_counter() - frontend_start_time
+        if self._native_binding is not None:
+            return self._synthesize_with_native_binding(
+                model=model,
+                request=request,
+                frontend_inputs=frontend_inputs,
+                frontend_elapsed=frontend_elapsed,
+            )
 
         payload_start_time = time.perf_counter()
         synthesis_payload = self._build_synthesis_payload(
@@ -722,6 +841,7 @@ class GgmlVulkanStyleBertVITS2Backend:
         wav_decode_elapsed = time.perf_counter() - decode_start_time
         jp_bert_timings = self._last_jp_bert_feature_timings
         self._last_synthesis_timings = GgmlSidecarSynthesisTimings(
+            transport="sidecar-http",
             frontend_mode=frontend_inputs.frontend_mode,
             synthesis_endpoint=self._synthesis_endpoint,
             frontend_seconds=frontend_elapsed,
@@ -795,6 +915,136 @@ class GgmlVulkanStyleBertVITS2Backend:
             jp_bert_http_text,
         )
         return int(sample_rate), cast(NDArray[Any], wave)
+
+    def _synthesize_with_native_binding(
+        self,
+        *,
+        model: GgmlStyleBertVITS2Model,
+        request: StyleBertVITS2SynthesisRequest,
+        frontend_inputs: _GgmlFrontendInputs,
+        frontend_elapsed: float,
+    ) -> tuple[int, NDArray[Any]]:
+        """Run synthesis through the in-process TTS.cpp native binding."""
+
+        if self._native_binding is None or model.native_model is None:
+            raise HTTPException(
+                status_code=500,
+                detail="TTS.cpp native binding model is not loaded.",
+            )
+
+        payload_start_time = time.perf_counter()
+        phone_ids = np.ascontiguousarray(
+            frontend_inputs.phone_ids.astype(np.int32, copy=False)
+        )
+        tone_ids = np.ascontiguousarray(
+            frontend_inputs.tone_ids.astype(np.int32, copy=False)
+        )
+        language_ids = np.ascontiguousarray(
+            frontend_inputs.language_ids.astype(np.int32, copy=False)
+        )
+        bert_array = np.ascontiguousarray(
+            frontend_inputs.ja_bert.astype(np.float32, copy=False).ravel(order="C")
+        )
+        payload_build_elapsed = time.perf_counter() - payload_start_time
+        bert_token_count = int(
+            frontend_inputs.ja_bert.shape[-1]
+            if frontend_inputs.ja_bert.ndim > 0
+            else 0
+        )
+        bert_float_count = int(frontend_inputs.ja_bert.size)
+        bert_binary_bytes = bert_float_count * np.dtype(np.float32).itemsize
+        numeric_payload_bytes = (
+            bert_binary_bytes
+            + phone_ids.nbytes
+            + tone_ids.nbytes
+            + language_ids.nbytes
+        )
+
+        try:
+            sample_rate, wave, native_elapsed = self._native_binding.synthesize_front(
+                model.native_model,
+                phone_ids=phone_ids,
+                tone_ids=tone_ids,
+                language_ids=language_ids,
+                bert=bert_array,
+                speaker_id=request.speaker_id,
+                style_id=request.style_id,
+                style_weight=request.style_weight,
+                sdp_ratio=request.sdp_ratio,
+                length_scale=request.length,
+                noise_scale=0.6,
+                noise_w_scale=0.8,
+            )
+        except TtsCppNativeBindingError as ex:
+            logger.error("TTS.cpp native binding inference failed.", exc_info=ex)
+            raise HTTPException(
+                status_code=500,
+                detail=f"TTS.cpp native binding inference failed: {ex}",
+            ) from ex
+
+        jp_bert_timings = self._last_jp_bert_feature_timings
+        self._last_synthesis_timings = GgmlSidecarSynthesisTimings(
+            transport="native-binding",
+            frontend_mode=frontend_inputs.frontend_mode,
+            synthesis_endpoint=self._synthesis_endpoint,
+            frontend_seconds=frontend_elapsed,
+            payload_build_seconds=payload_build_elapsed,
+            json_encode_seconds=0.0,
+            sidecar_http_seconds=native_elapsed,
+            wav_decode_seconds=0.0,
+            request_json_bytes=0,
+            response_wav_bytes=int(wave.nbytes),
+            bert_token_count=bert_token_count,
+            bert_float_count=bert_float_count,
+            bert_binary_bytes=bert_binary_bytes,
+            bert_payload_format="native-f32",
+            bert_payload_bytes=bert_binary_bytes,
+            numeric_payload_bytes=numeric_payload_bytes,
+            request_json_to_bert_binary_ratio=0.0,
+            phone_id_count=int(phone_ids.size),
+            symbol_count=None,
+            jp_bert_request_json_bytes=(
+                jp_bert_timings.request_json_bytes
+                if jp_bert_timings is not None
+                else None
+            ),
+            jp_bert_response_json_bytes=(
+                jp_bert_timings.response_json_bytes
+                if jp_bert_timings is not None
+                else None
+            ),
+            jp_bert_http_seconds=(
+                jp_bert_timings.http_seconds if jp_bert_timings is not None else None
+            ),
+            jp_bert_json_decode_seconds=(
+                jp_bert_timings.json_decode_seconds
+                if jp_bert_timings is not None
+                else None
+            ),
+            native_synthesis_seconds=native_elapsed,
+            native_jp_bert_seconds=(
+                jp_bert_timings.http_seconds if jp_bert_timings is not None else None
+            ),
+        )
+        logger.info(
+            "TTS.cpp ggml/%s native timings: frontend_mode %s, synthesis_endpoint %s, frontend %.3fs, payload_build %.3fs, native_synthesis %.3fs, output_bytes %d, bert_tokens %d, bert_float_count %d, bert_binary_bytes %d, native_jp_bert %s.",
+            self._tts_cpp_backend,
+            frontend_inputs.frontend_mode,
+            self._synthesis_endpoint,
+            frontend_elapsed,
+            payload_build_elapsed,
+            native_elapsed,
+            int(wave.nbytes),
+            bert_token_count,
+            bert_float_count,
+            bert_binary_bytes,
+            (
+                f"{jp_bert_timings.http_seconds:.3f}s"
+                if jp_bert_timings is not None
+                else "n/a"
+            ),
+        )
+        return sample_rate, wave
 
     def _supports_sdp_ratio(self, sdp_ratio: float) -> bool:
         return self._allow_nonzero_sdp or abs(sdp_ratio) <= 1e-6
@@ -1047,7 +1297,10 @@ class GgmlVulkanStyleBertVITS2Backend:
             .reshape(-1)
             .tolist()
         )
-        token_features = self._extract_tts_cpp_jp_bert_features(input_ids)
+        token_features = self._extract_tts_cpp_jp_bert_features(
+            model=model,
+            input_ids=input_ids,
+        )
         if token_features.shape[0] != len(word2ph):
             raise HTTPException(
                 status_code=500,
@@ -1082,9 +1335,44 @@ class GgmlVulkanStyleBertVITS2Backend:
 
     def _extract_tts_cpp_jp_bert_features(
         self,
+        *,
+        model: GgmlStyleBertVITS2Model,
         input_ids: list[int],
     ) -> NDArray[Any]:
         """Run TTS.cpp `/jp-bert/features` and return token-major features."""
+
+        if self._native_binding is not None:
+            if model.native_model is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="TTS.cpp native JP-BERT model is not loaded.",
+                )
+            input_ids_array = np.asarray(input_ids, dtype=np.int32)
+            try:
+                features, native_elapsed = (
+                    self._native_binding.encode_jp_bert_features(
+                        model.native_model,
+                        input_ids_array,
+                    )
+                )
+            except TtsCppNativeBindingError as ex:
+                logger.error(
+                    "TTS.cpp native JP-BERT feature extraction failed.",
+                    exc_info=ex,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"TTS.cpp native JP-BERT feature extraction failed: {ex}",
+                ) from ex
+
+            self._last_jp_bert_feature_timings = _GgmlJpBertFeatureTimings(
+                request_json_bytes=0,
+                response_json_bytes=int(features.nbytes),
+                http_seconds=native_elapsed,
+                json_decode_seconds=0.0,
+                transport="native-binding",
+            )
+            return features
 
         payload = {
             "input_ids": input_ids,
@@ -1120,6 +1408,7 @@ class GgmlVulkanStyleBertVITS2Backend:
             response_json_bytes=len(response.content),
             http_seconds=http_elapsed,
             json_decode_seconds=json_decode_elapsed,
+            transport="sidecar-http",
         )
 
         if response_json.get("dtype") != "float32":
@@ -1157,7 +1446,7 @@ class GgmlVulkanStyleBertVITS2Backend:
         return cast(NDArray[Any], features.reshape((tokens, hidden_size)))
 
     def close(self) -> None:
-        """Stop the managed sidecar when this backend owns one."""
+        """Release owned ggml transport resources."""
 
         if self._managed_sidecar is not None:
             self._managed_sidecar.stop()

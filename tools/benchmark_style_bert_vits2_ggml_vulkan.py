@@ -1,4 +1,4 @@
-"""Benchmark Style-Bert-VITS2 ONNX CPU against the ggml/Vulkan sidecar."""
+"""Benchmark Style-Bert-VITS2 ONNX CPU against ggml/Vulkan transports."""
 
 # ruff: noqa: E402
 
@@ -95,6 +95,7 @@ class _GgmlBackendSpec:
     synthesis_endpoint: str
     expected_log_text: str | None
     require_style_bert_timings: bool
+    transport: str = "sidecar-http"
 
 
 _BACKEND_TIMING_SUMMARY_FIELDS = (
@@ -103,6 +104,8 @@ _BACKEND_TIMING_SUMMARY_FIELDS = (
     "json_encode_seconds",
     "sidecar_http_seconds",
     "wav_decode_seconds",
+    "native_synthesis_seconds",
+    "native_jp_bert_seconds",
     "request_json_bytes",
     "response_wav_bytes",
     "bert_token_count",
@@ -837,6 +840,17 @@ def _parse_ggml_backend_specs(args: argparse.Namespace) -> list[_GgmlBackendSpec
     frontend_names = args.ggml_frontend or ["onnx-bert"]
     synthesis_endpoint_names = args.ggml_synthesis_endpoint or ["synthesize-front"]
     vulkan_precision_names = args.ggml_vulkan_precision or ["accurate"]
+    transport = (
+        "native-binding"
+        if getattr(args, "ggml_native_library_path", None) is not None
+        else "sidecar-http"
+    )
+    transport_suffix = "-native" if transport == "native-binding" else ""
+    if transport == "native-binding" and synthesis_endpoint_names != ["synthesize-front"]:
+        raise ValueError(
+            "--ggml_native_library_path currently supports only "
+            "--ggml_synthesis_endpoint synthesize-front."
+        )
     include_precision_suffix = (
         len(vulkan_precision_names) > 1 or vulkan_precision_names[0] != "accurate"
     )
@@ -868,26 +882,44 @@ def _parse_ggml_backend_specs(args: argparse.Namespace) -> list[_GgmlBackendSpec
                             _GgmlBackendSpec(
                                 name=(
                                     "ggml-vulkan"
-                                    f"{precision_suffix}{frontend_suffix}{endpoint_suffix}"
+                                    f"{precision_suffix}{frontend_suffix}{endpoint_suffix}{transport_suffix}"
                                 ),
                                 tts_cpp_backend="vulkan",
+                                transport=transport,
                                 vulkan_precision=vulkan_precision_name,
                                 use_tts_cpp_jp_bert=use_tts_cpp_jp_bert,
                                 synthesis_endpoint=synthesis_endpoint_name,
-                                expected_log_text=args.expect_sidecar_log_contains,
-                                require_style_bert_timings=args.ggml_debug_timings,
+                                expected_log_text=(
+                                    args.expect_sidecar_log_contains
+                                    if transport == "sidecar-http"
+                                    else None
+                                ),
+                                require_style_bert_timings=(
+                                    args.ggml_debug_timings
+                                    if transport == "sidecar-http"
+                                    else False
+                                ),
                             )
                         )
                 elif backend_name == "cpu":
                     specs.append(
                         _GgmlBackendSpec(
-                            name=f"ggml-cpu{frontend_suffix}{endpoint_suffix}",
+                            name=f"ggml-cpu{frontend_suffix}{endpoint_suffix}{transport_suffix}",
                             tts_cpp_backend="cpu",
+                            transport=transport,
                             vulkan_precision=None,
                             use_tts_cpp_jp_bert=use_tts_cpp_jp_bert,
                             synthesis_endpoint=synthesis_endpoint_name,
-                            expected_log_text=args.expect_cpu_sidecar_log_contains,
-                            require_style_bert_timings=args.ggml_debug_timings,
+                            expected_log_text=(
+                                args.expect_cpu_sidecar_log_contains
+                                if transport == "sidecar-http"
+                                else None
+                            ),
+                            require_style_bert_timings=(
+                                args.ggml_debug_timings
+                                if transport == "sidecar-http"
+                                else False
+                            ),
                         )
                     )
                 else:
@@ -908,6 +940,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--gguf_path", required=True, type=Path)
     parser.add_argument("--jp_bert_gguf_path", type=Path)
     parser.add_argument("--tts_server_path", required=True, type=Path)
+    parser.add_argument("--ggml_native_library_path", type=Path)
     parser.add_argument("--bert_cache_dir", type=Path)
     parser.add_argument("--output_json", type=Path)
     parser.add_argument("--sidecar_log_path", type=Path)
@@ -1115,6 +1148,7 @@ def main() -> None:
                 ggml_bert_payload_format=args.ggml_bert_payload_format,
                 ggml_tts_server_debug_timings=args.ggml_debug_timings,
                 ggml_tts_server_log_path=backend_log_path,
+                ggml_native_library_path=args.ggml_native_library_path,
             )
             ggml_engines.append(ggml_engine)
             ggml_engine.load_model(model_uuid)
@@ -1128,16 +1162,42 @@ def main() -> None:
                 )
             )
 
-            sidecar_diagnostics[ggml_backend_spec.name] = _read_sidecar_diagnostics(
-                spec=ggml_backend_spec,
-                log_path=backend_log_path,
-            )
+            if ggml_backend_spec.transport == "sidecar-http":
+                sidecar_diagnostics[ggml_backend_spec.name] = (
+                    _read_sidecar_diagnostics(
+                        spec=ggml_backend_spec,
+                        log_path=backend_log_path,
+                    )
+                )
+            else:
+                sidecar_diagnostics[ggml_backend_spec.name] = {
+                    "transport": ggml_backend_spec.transport,
+                    "log_path": None,
+                    "expected_log_text": None,
+                    "vulkan_device_evidence": [],
+                    "style_bert_vits2_timings": {
+                        "event_count": 0,
+                        "events": [],
+                        "events_truncated": False,
+                        "summary_by_marker": {},
+                        "graph_event_totals": {
+                            "count": 0,
+                            "compute_submit_ms_sum": 0.0,
+                            "read_ms_sum": 0.0,
+                            "total_ms_sum": 0.0,
+                        },
+                    },
+                }
 
         sidecar_logs = {
-            ggml_backend_spec.name: str(
-                sidecar_log_path.with_name(
-                    f"{sidecar_log_path.stem}-{ggml_backend_spec.name}{sidecar_log_path.suffix}"
+            ggml_backend_spec.name: (
+                str(
+                    sidecar_log_path.with_name(
+                        f"{sidecar_log_path.stem}-{ggml_backend_spec.name}{sidecar_log_path.suffix}"
+                    )
                 )
+                if ggml_backend_spec.transport == "sidecar-http"
+                else None
             )
             for ggml_backend_spec in ggml_backend_specs
         }
@@ -1177,6 +1237,11 @@ def main() -> None:
                     else None
                 ),
                 "tts_server_path": str(args.tts_server_path),
+                "ggml_native_library_path": (
+                    str(args.ggml_native_library_path)
+                    if args.ggml_native_library_path is not None
+                    else None
+                ),
                 "sidecar_logs": sidecar_logs,
                 "sidecar_diagnostics": sidecar_diagnostics,
                 "ggml_backends": [
@@ -1186,6 +1251,7 @@ def main() -> None:
                     {
                         "name": ggml_backend_spec.name,
                         "tts_cpp_backend": ggml_backend_spec.tts_cpp_backend,
+                        "transport": ggml_backend_spec.transport,
                         "vulkan_precision": ggml_backend_spec.vulkan_precision,
                         "use_tts_cpp_jp_bert": (
                             ggml_backend_spec.use_tts_cpp_jp_bert

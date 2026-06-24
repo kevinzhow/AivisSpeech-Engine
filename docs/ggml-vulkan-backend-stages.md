@@ -349,6 +349,7 @@ Current CLI flags:
 - `--ggml_vulkan_allow_nonzero_sdp`
 - `--ggml_synthesis_endpoint synthesize-front|synthesize-symbols`
 - `--ggml_bert_payload_format base64|json-array`
+- `--ggml_native_library_path <path-to-libtts.so-or-platform-equivalent>`
 - `--ggml_tts_server_debug_timings`
 - `--ggml_tts_server_log_path <path-to-sidecar-log>`
 - benchmark-only: `--expect_ggml_vulkan_mean_rtf_at_most <rtf>`
@@ -399,6 +400,30 @@ uv run python run.py \
   --ggml_bert_payload_format base64
 ```
 
+Native binding is the experimental in-process transport for the same ggml backend. It loads TTS.cpp's shared `libtts` C API instead of starting `tts-server`, so there is no localhost HTTP, JSON tensor transfer, base64 BERT payload, or WAV decode step. It still uses Engine-side normalization/g2p/phone alignment, and the current C API supports only `synthesize-front`; `synthesize-symbols` and a fully fused text-to-audio endpoint remain sidecar/future work.
+
+```bash
+MESA_VK_DEVICE_SELECT=1002:1900! \
+uv run python run.py \
+  --tts_backend ggml-vulkan \
+  --ggml_tts_server_backend vulkan \
+  --ggml_model_path /path/to/gguf-model-directory \
+  --ggml_vulkan_model mao-full-sdp \
+  --ggml_jp_bert_model style-bert-vits2-jp-bert \
+  --ggml_native_library_path /path/to/TTS.cpp/build/src/libtts.so \
+  --ggml_vulkan_precision accurate
+```
+
+The native binding path requires TTS.cpp to be built as shared libraries, for example:
+
+```bash
+cmake -S /path/to/TTS.cpp -B /path/to/TTS.cpp/build-native-binding-shared \
+  -DBUILD_SHARED_LIBS=ON \
+  -DTTS_BUILD_EXAMPLES=OFF \
+  -DGGML_VULKAN=ON
+cmake --build /path/to/TTS.cpp/build-native-binding-shared --target tts -j2
+```
+
 Known remaining work before calling the whole staged plan complete:
 
 - Stage acceptance coverage snapshot:
@@ -410,9 +435,9 @@ Known remaining work before calling the whole staged plan complete:
 | Stage 2 | AIVM/Safetensors primary source, lazy GGUF cache, same-UUID AIVMX compatibility, cache invalidation/regeneration, CPU/Vulkan load proof | `AivmInfosRepository`, `AivmGgufCache`, `AivmManager` cache deletion, cache unit tests, opt-in `.aivm` -> GGUF -> sidecar integration test | Done for the external TTS.cpp converter route. |
 | Stage 3 | deterministic duration/silence parity, unsupported request routing, empty/punctuation/long/multi-style coverage | opt-in local golden-suite integration test, non-Japanese/unknown-architecture unit gates, non-zero SDP fallback gate | Partial. Duration/silence parity is gated; waveform-distance, broader fixtures, and stable non-zero SDP parity remain open. |
 | Stage 4 | visible diagnostics, clean sidecar startup/shutdown, request serialization consistent with engine lock, structured errors | `ManagedTtsCppSidecar.status`, backend `diagnostics`, FastAPI shutdown close path, startup log-tail propagation tests, sidecar run under engine inference lock | Done for Option A managed sidecar. Cross-platform packaging/runtime validation still needs release testing. |
-| Stage 5 | real end-to-end RTF improvement with device evidence, active bottleneck attribution, no silent CPU fallback | engine telemetry, benchmark harness, Vulkan log gates, payload/timing summary fields, local AMD 780M benchmark evidence | Partial. Measurement exists; fused TTS.cpp frontend/native binding and broader device matrices remain open. |
+| Stage 5 | real end-to-end RTF improvement with device evidence, active bottleneck attribution, no silent CPU fallback | engine telemetry, benchmark harness, Vulkan log gates, payload/timing summary fields, native-binding transport, local AMD 780M benchmark evidence | Partial. Native binding removes HTTP/base64/WAV transport overhead; fully fused TTS.cpp text/frontend routing and broader device matrices remain open. |
 
-- Completion boundary: this repository now has a functional opt-in ggml/Vulkan backend through a managed TTS.cpp sidecar, automatic AIVM/Safetensors-to-GGUF cache conversion, deterministic parity gates, diagnostics, and benchmark tooling. The whole staged plan is not complete until Stage 5's open performance work is closed: a fused TTS.cpp text/frontend route or native binding that avoids sidecar tensor transfer, plus broader device/performance validation and final parity conclusions for fast mode and non-zero SDP.
+- Completion boundary: this repository now has a functional opt-in ggml/Vulkan backend through a managed TTS.cpp sidecar or experimental native binding, automatic AIVM/Safetensors-to-GGUF cache conversion, deterministic parity gates, diagnostics, and benchmark tooling. The whole staged plan is not complete until Stage 5's open performance work is closed: a fused TTS.cpp text/frontend route that keeps tokenization, JP-BERT, and synthesis tensors inside TTS.cpp, plus broader device/performance validation and final parity conclusions for fast mode and non-zero SDP.
 - A strict managed-sidecar smoke test has been proven locally with the `まお` AIVMX/AIVM pair and a preconverted `mao-full-sdp.gguf`: the engine produced a float32 waveform and the sidecar log showed `POST /v1/style-bert-vits2/synthesize-front 200` on `AMD Radeon 780M Graphics (RADV PHOENIX)`.
 - That smoke test is now captured as an opt-in pytest integration test:
 
@@ -498,12 +523,16 @@ uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --expect_ggml_vulkan_mean_rtf_at_most 0.2
 ```
 
-The benchmark requires `.aivm`/Safetensors for the ggml path and `.aivmx` only for the ONNX baseline. It can now run a managed TTS.cpp matrix by repeating `--ggml_backend`, for example `--ggml_backend cpu --ggml_backend vulkan`, can compare frontend modes with `--ggml_frontend onnx-bert --ggml_frontend tts-cpp-jp-bert`, can compare sidecar synthesis endpoints with `--ggml_synthesis_endpoint synthesize-front --ggml_synthesis_endpoint synthesize-symbols`, can compare Vulkan precision modes with repeated `--ggml_vulkan_precision accurate --ggml_vulkan_precision fast`, can select `--ggml_bert_payload_format base64|json-array`, and can require graph timing evidence with `--ggml_debug_timings`. The default `base64` mode uses TTS.cpp's `json_float_array` support for a `bert_b64` sibling field, so it remains the same `/synthesize-front` or `/synthesize-symbols` protocol with a smaller BERT tensor representation. It also has opt-in performance gates for Stage 5 validation: overall ggml/Vulkan mean RTF, per-text ggml/Vulkan mean RTF, overall RTF ratio versus ONNX CPU, and per-text RTF ratio versus ONNX CPU. These gates are intentionally benchmark-only and disabled by default; when enabled, the JSON report includes `performance_gates.checks` and the command exits non-zero if any `ggml-vulkan*` backend violates the configured threshold. Use `--ggml_frontend tts-cpp-jp-bert` when applying a `0.2`-RTF performance gate; include `--ggml_frontend onnx-bert` only for comparison runs, because ONNX-BERT frontend smokes include extra Python frontend work and are not the current best ggml path. `synthesize-symbols` is an intermediate TTS.cpp endpoint that moves phone/tone/language ID mapping into TTS.cpp, but it still requires Engine-side BERT features and still sends the large BERT tensor over the sidecar request; it is not the final fused text-to-audio path. Parsed timing evidence is stored under `metadata.sidecar_diagnostics.<backend>.style_bert_vits2_timings`, including per-marker summaries and graph-event totals for `compute_submit_ms`, `read_ms`, and `total_ms`. Each measured `records[]` entry now includes `backend_timings` for ggml runs: frontend mode, synthesis endpoint, frontend seconds, payload build seconds, JSON encode seconds, sidecar HTTP seconds, WAV decode seconds, request JSON bytes, response WAV bytes, BERT token/float counts, the float32 BERT binary lower-bound byte size, selected BERT payload format, BERT payload byte size, total numeric payload byte size, the full JSON request to BERT-binary ratio, phone/symbol payload counts, and JP-BERT feature request timing/bytes when enabled. These payload-size fields are the Stage 5 evidence for whether a run is dominated by sidecar tensor transfer instead of the TTS.cpp graph itself. The JSON report keeps the original aggregate `summary`, and also writes `per_text_summary`, `per_text_backend_timing_summary`, `rtf_ratio_vs_onnx_cpu`, and `performance_gates` so short-sentence overhead, payload overhead, and local performance acceptance failures are not hidden by medium/long averages. It also writes `metadata.benchmark_profile`, which labels one-run no-warmup reports as `cold_smoke` and warm repeated reports as `warm_steady_state`. Remaining Stage 5 work: backend comparison matrices across devices, fused TTS.cpp text/frontend routing, finer TTS.cpp graph timing coverage for text encoder/duration predictor stages, fast-mode parity conclusions from a broader golden suite, and native binding optimization.
+The benchmark requires `.aivm`/Safetensors for the ggml path and `.aivmx` only for the ONNX baseline. It can now run a managed TTS.cpp matrix by repeating `--ggml_backend`, for example `--ggml_backend cpu --ggml_backend vulkan`, can compare frontend modes with `--ggml_frontend onnx-bert --ggml_frontend tts-cpp-jp-bert`, can compare sidecar synthesis endpoints with `--ggml_synthesis_endpoint synthesize-front --ggml_synthesis_endpoint synthesize-symbols`, can compare Vulkan precision modes with repeated `--ggml_vulkan_precision accurate --ggml_vulkan_precision fast`, can select `--ggml_bert_payload_format base64|json-array`, can require graph timing evidence with `--ggml_debug_timings`, and can switch from sidecar HTTP to in-process C API with `--ggml_native_library_path`. The default `base64` mode uses TTS.cpp's `json_float_array` support for a `bert_b64` sibling field, so it remains the same `/synthesize-front` or `/synthesize-symbols` protocol with a smaller BERT tensor representation. Native binding specs are labeled with a `-native` suffix and are restricted to `synthesize-front` until the C API grows a symbol or text endpoint.
+
+The benchmark also has opt-in performance gates for Stage 5 validation: overall ggml/Vulkan mean RTF, per-text ggml/Vulkan mean RTF, overall RTF ratio versus ONNX CPU, and per-text RTF ratio versus ONNX CPU. These gates are intentionally benchmark-only and disabled by default; when enabled, the JSON report includes `performance_gates.checks` and the command exits non-zero if any `ggml-vulkan*` backend violates the configured threshold. Use `--ggml_frontend tts-cpp-jp-bert` when applying a `0.2`-RTF performance gate; include `--ggml_frontend onnx-bert` only for comparison runs, because ONNX-BERT frontend smokes include extra Python frontend work and are not the current best ggml path. `synthesize-symbols` is an intermediate TTS.cpp endpoint that moves phone/tone/language ID mapping into TTS.cpp, but it still requires Engine-side BERT features and still sends the large BERT tensor over the sidecar request; it is not the final fused text-to-audio path.
+
+Parsed sidecar timing evidence is stored under `metadata.sidecar_diagnostics.<backend>.style_bert_vits2_timings`, including per-marker summaries and graph-event totals for `compute_submit_ms`, `read_ms`, and `total_ms`. Native binding runs do not have sidecar logs, so their diagnostics record `transport=native-binding`, the library path, and per-request native timing fields instead of Vulkan log evidence. Each measured `records[]` entry now includes `backend_timings` for ggml runs: frontend mode, synthesis endpoint, transport, frontend seconds, payload build seconds, JSON encode seconds, sidecar/native synthesis seconds, WAV decode seconds, request JSON bytes, response WAV bytes, BERT token/float counts, the float32 BERT binary lower-bound byte size, selected BERT payload format, BERT payload byte size, total numeric payload byte size, the full JSON request to BERT-binary ratio, phone/symbol payload counts, and JP-BERT feature request timing/bytes when enabled. These payload-size fields are the Stage 5 evidence for whether a run is dominated by sidecar tensor transfer instead of the TTS.cpp graph itself. The JSON report keeps the original aggregate `summary`, and also writes `per_text_summary`, `per_text_backend_timing_summary`, `rtf_ratio_vs_onnx_cpu`, and `performance_gates` so short-sentence overhead, payload overhead, and local performance acceptance failures are not hidden by medium/long averages. It also writes `metadata.benchmark_profile`, which labels one-run no-warmup reports as `cold_smoke` and warm repeated reports as `warm_steady_state`. Remaining Stage 5 work: backend comparison matrices across devices, fused TTS.cpp text/frontend routing, finer TTS.cpp graph timing coverage for text encoder/duration predictor stages, fast-mode parity conclusions from a broader golden suite, and reducing the remaining native tensor copies.
 
 Performance interpretation guardrails:
 
 - The TTS.cpp unsupported-route fix for generic `/v1/audio/speech` is a stability and integration correctness change, not a synthesis performance optimization. It prevents Style-Bert-VITS2 requests from aborting the server when the wrong generic route is used.
-- The current best integrated performance path is `--ggml_frontend tts-cpp-jp-bert` plus `--ggml_synthesis_endpoint synthesize-front` and `--ggml_bert_payload_format base64`.
+- The current best integrated performance path is `--ggml_frontend tts-cpp-jp-bert` plus `--ggml_synthesis_endpoint synthesize-front`; use `--ggml_native_library_path` when a shared TTS.cpp library is available, otherwise use sidecar HTTP with `--ggml_bert_payload_format base64`.
 - Results labeled `frontend_mode onnx-bert` still use Python-side ONNX BERT feature extraction. They are useful as a comparison baseline, but they should not be used to judge the ggml JP-BERT path.
 - One-run `cold_smoke` results, especially the 6-character short sentence, are for route/device validation only. Treat warmed short/medium/long runs as the evidence for performance trend.
 
@@ -530,6 +559,17 @@ Latest TTS.cpp JP-BERT/base64 warmed probe on 2026-06-24 wrote `/tmp/aivis-ggml-
 
 This confirms that the current TTS.cpp JP-BERT path is the one that brings integrated AivisSpeech ggml/Vulkan back to the expected `~0.2` RTF range. The short sentence is still slightly above `0.2` in this run because fixed sidecar/frontend overhead dominates one-second audio, while medium and long text are below `0.2`.
 
+Native-binding JP-BERT warmed probe on 2026-06-24 wrote `/tmp/aivis-ggml-native-binding-jp-bert-summary.json` with `MESA_VK_DEVICE_SELECT=1002:1900!`, `--ggml_backend vulkan`, `--ggml_frontend tts-cpp-jp-bert`, `--jp_bert_gguf_path /home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-jp-bert.gguf`, `--ggml_synthesis_endpoint synthesize-front`, `--ggml_native_library_path /home/kevinzhow/github/TTS.cpp/build-native-binding-shared/src/libtts.so`, `--warmup_runs 1`, and `--runs 1`. The TTS.cpp shared library printed Vulkan device discovery for `AMD Radeon 780M Graphics (RADV PHOENIX)` during the run. Treat it as a quick warmed probe, but it is the current best integrated route because it removes HTTP, base64 tensor transfer, and WAV decode from the sidecar path:
+
+| text length | ONNX CPU RTF | ggml Vulkan + native JP-BERT RTF | frontend | native JP-BERT | native synthesis | request JSON bytes | BERT payload |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| short, 6 chars | `0.369` | `0.219` | `0.078s` | `0.078s` | `0.136s` | `0` | `native-f32` |
+| medium, 11 chars | `0.306` | `0.176` | `0.087s` | `0.086s` | `0.213s` | `0` | `native-f32` |
+| long, 41 chars | `0.196` | `0.129` | `0.114s` | `0.112s` | `0.856s` | `0` | `native-f32` |
+| overall mean | `0.290` | `0.175` | n/a | n/a | n/a | n/a | n/a |
+
+The native binding improvement is real but modest versus sidecar JP-BERT/base64 (`0.189` -> `0.175` overall in these quick warmed probes). It removes process/HTTP/serialization/WAV overhead, but the current C API still copies input arrays into C++ vectors, returns JP-BERT features to Python, and then passes those features back into synthesis. A fully fused TTS.cpp Style-Bert-VITS2 text/frontend endpoint would remove that remaining tensor crossing.
+
 Earlier JSON-array frontend-matrix benchmark result on 2026-06-24 on the local AMD 780M host, with `--expect_sidecar_log_contains 'AMD Radeon 780M Graphics'` passing:
 
 | text length | ONNX CPU mean RTF | ggml Vulkan mean RTF | ggml Vulkan + TTS.cpp JP-BERT mean RTF |
@@ -552,7 +592,7 @@ Together these runs confirm:
 - TTS.cpp JP-BERT feature extraction is the current preferred performance path and improves the integrated short/medium/long ggml/Vulkan run versus the ONNX CPU baseline in the latest warmed probe, but it still returns BERT features to Python and then sends those features back to `/synthesize-front`.
 - TTS.cpp `/synthesize-symbols` is now selectable for Engine/benchmark probes, but it only replaces Engine-side phone/tone/language ID mapping; it does not remove the BERT tensor transfer.
 - The default `bert_b64` path reduces the request JSON / BERT binary ratio from the earlier `3.55x-3.77x` JSON-array range to about `1.34x` on the same short/medium/long warmed probe.
-- The next real performance step is a fused TTS.cpp Style-Bert-VITS2 endpoint or native binding that keeps tokenization/BERT/synthesis tensors inside one process and avoids HTTP/base64 tensor transfer entirely.
+- The implemented native binding removes HTTP/base64/WAV transport overhead. The next real performance step is a fused TTS.cpp Style-Bert-VITS2 endpoint that keeps tokenization, JP-BERT features, and synthesis tensors inside one TTS.cpp call.
 
 Verified short/medium/long benchmark result with non-zero SDP (`--tempo_dynamics_scale 1.0 --ggml_vulkan_allow_nonzero_sdp`) on the same host:
 

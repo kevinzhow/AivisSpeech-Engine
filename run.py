@@ -227,6 +227,7 @@ class _CLIArgs:
     ggml_bert_payload_format: str
     ggml_tts_server_debug_timings: bool
     ggml_tts_server_log_path: Path | None
+    ggml_native_library_path: Path | None
     load_all_models: bool
     output_log_utf8: bool
     cors_policy_mode: CorsPolicyMode | None
@@ -300,7 +301,7 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
         help=(
             "TTS.cpp サイドカーにロード済みの Style-Bert-VITS2 JP-BERT モデル名です。"
             "指定した場合、日本語 BERT 特徴量抽出に TTS.cpp の /jp-bert/features を利用します。"
-            "managed sidecar で利用する場合は --ggml_model_path に合成 GGUF と JP-BERT GGUF を含むディレクトリを指定してください。"
+            "managed sidecar または native binding で利用する場合は --ggml_model_path に合成 GGUF と JP-BERT GGUF を含むディレクトリを指定してください。"
         ),
     )
     parser.add_argument(
@@ -356,13 +357,14 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
         default=None,
         help=(
             "managed sidecar で利用する事前変換済み GGUF ファイルまたは GGUF ディレクトリです。"
+            "native binding では共有ライブラリに渡す具体的な GGUF ファイル解決にも利用します。"
             "AIVM/Safetensors からの cache 変換結果がある場合はそちらが優先されます。"
         ),
     )
     parser.add_argument(
         "--ggml_vulkan_device",
         default=None,
-        help="TTS.cpp sidecar に渡す TTS_DEVICE の値です。",
+        help="TTS.cpp sidecar/native binding に渡す TTS_DEVICE の値です。",
     )
     parser.add_argument(
         "--ggml_vulkan_precision",
@@ -415,6 +417,15 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
         help=(
             "managed sidecar として起動した TTS.cpp tts-server のログ保存先です。"
             "指定しない場合はユーザーデータディレクトリ配下の tts-cpp-sidecar.log を利用します。"
+        ),
+    )
+    parser.add_argument(
+        "--ggml_native_library_path",
+        type=Path,
+        default=None,
+        help=(
+            "TTS.cpp Style-Bert-VITS2 native binding の共有ライブラリ (libtts.so など) です。"
+            "指定した場合、TTS.cpp sidecar HTTP の代わりに同一プロセス内の C API を呼び出します。"
         ),
     )
     # parser.add_argument(
@@ -645,6 +656,7 @@ def main() -> None:
                 ggml_bert_payload_format=args.ggml_bert_payload_format,
                 ggml_tts_server_debug_timings=args.ggml_tts_server_debug_timings,
                 ggml_tts_server_log_path=args.ggml_tts_server_log_path,
+                ggml_native_library_path=args.ggml_native_library_path,
             ),
             MOCK_CORE_VERSION,
         )
