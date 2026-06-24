@@ -2,7 +2,8 @@
 
 This benchmark compares the current AivisSpeech Style-Bert-VITS2 path across
 ONNX Runtime CPU, ONNX Runtime CUDA, and TTS.cpp ggml/Vulkan on both the local
-AMD iGPU and NVIDIA dGPU. It also records a Windows Intel Arc B580 sidecar run.
+AMD iGPU and NVIDIA dGPU. It also records a Windows Intel Arc B580 native
+binding run.
 RTF is `elapsed_seconds / output_duration_seconds`; lower is better.
 
 ## Scope
@@ -81,46 +82,65 @@ the ONNX CPU, ONNX CUDA, and AMD 780M ggml columns, and
 ggml column. The RTX 3060 run also repeated the ONNX baselines; those values are
 stored in the JSON artifact and were close to the AMD-run baseline values.
 
-## Windows Intel Arc B580 Sidecar Result
+## Windows Intel Arc B580 Native Binding Result
 
 This run was captured on 2026-06-25, Asia/Tokyo, on Windows 11 with an
-Intel(R) Arc(TM) B580 Graphics device using driver `32.0.101.8826`. The local
-TTS.cpp build had `tts-server.exe` but did not have a native shared library
-(`tts.dll`), so this result uses the managed sidecar HTTP transport rather than
-the native TTS.cpp C API used in the Linux table above. It is useful as local
-device evidence and a sidecar-path benchmark, but should not be mixed directly
-with the native-binding rows.
+Intel(R) Arc(TM) B580 Graphics device using driver `32.0.101.8826`.
 
-The run used `--warmup_runs 1 --runs 3`, `tts-cpp-jp-bert`,
-`synthesize-front`, `accurate` Vulkan precision, and the default base64 BERT
-payload format. The JSON artifact is:
+The local TTS.cpp checkout was updated to `ea100b4` (`Export Style-Bert-VITS2
+native C API`) and built as a shared Vulkan library. The build required one
+local CMake fix for shared Windows linking: `src/CMakeLists.txt` adds
+`../ggml-patches/llama-mmap.cpp` to the `tts` target so `tts.dll` contains the
+model loader's mmap implementation.
+
+Build artifact:
 
 ```text
-C:\Users\kevin\run-logs\aivis-style-bert-vits2-b580-sidecar-warm.json
+C:\Users\kevin\TTS.cpp\build-vulkan-native\bin\tts.dll
 ```
 
-The captured TTS.cpp device evidence was:
+Benchmark artifact:
+
+```text
+C:\Users\kevin\run-logs\aivis-style-bert-vits2-b580-native-warm.json
+```
+
+The run used `--warmup_runs 1 --runs 3`, `tts-cpp-jp-bert`,
+`synthesize-front`, `accurate` Vulkan precision, and
+`--ggml_native_library_path C:\Users\kevin\TTS.cpp\build-vulkan-native\bin\tts.dll`.
+The benchmark transport was `native-binding`; no sidecar process or HTTP
+transport was used.
+
+The captured Vulkan device evidence was:
 
 ```text
 ggml_vulkan: Found 1 Vulkan devices:
 ggml_vulkan: 0 = Intel(R) Arc(TM) B580 Graphics (Intel Corporation) | uma: 0 | fp16: 0 | bf16: 0 | warp size: 32 | shared memory: 49152 | int dot: 1 | matrix cores: none
 ```
 
-| text length | chars | ONNX CPU RTF | ggml Vulkan Intel Arc B580 sidecar RTF | ggml/ONNX CPU RTF ratio |
+| text length | chars | ONNX CPU RTF | ggml Vulkan Intel Arc B580 native RTF | ggml/ONNX CPU RTF ratio |
 | --- | ---: | ---: | ---: | ---: |
-| short | 6 | `0.444` | `0.184` | `0.414` |
-| medium | 10 | `0.377` | `0.156` | `0.413` |
-| long | 41 | `0.276` | `0.069` | `0.251` |
-| overall mean | - | `0.366` | `0.136` | `0.373` |
+| short | 6 | `0.454` | `0.128` | `0.281` |
+| medium | 10 | `0.375` | `0.105` | `0.281` |
+| long | 41 | `0.270` | `0.055` | `0.203` |
+| overall mean | - | `0.366` | `0.096` | `0.262` |
+
+Native timing breakdown:
+
+| text length | JP-BERT seconds | synthesis seconds | total frontend seconds | numeric payload |
+| --- | ---: | ---: | ---: | ---: |
+| short | `0.041` | `0.080` | `0.042` | `108.3 KiB` |
+| medium | `0.059` | `0.102` | `0.060` | `156.5 KiB` |
+| long | `0.077` | `0.331` | `0.080` | `782.3 KiB` |
 
 Interpretation:
 
-- The Windows Intel Arc B580 sidecar path is active and faster than ONNX CPU in
-  this run, with overall ggml/Vulkan RTF at `37.3%` of ONNX CPU.
+- The Windows Intel Arc B580 native binding path is active and faster than ONNX
+  CPU in this run, with overall ggml/Vulkan RTF at `26.2%` of ONNX CPU.
+- The native C API path excludes sidecar HTTP, base64 payload, and WAV decode
+  overhead from the ggml timing path.
 - Short text remains more overhead-sensitive than long text. The long text
-  amortizes sidecar and payload overhead best, reaching `0.069` RTF.
-- Because this run uses sidecar HTTP transport, the numbers include local JSON,
-  base64 BERT payload, WAV decode, and sidecar request overhead.
+  amortizes frontend and native call overhead best, reaching `0.055` RTF.
 
 ## Reproduction
 
