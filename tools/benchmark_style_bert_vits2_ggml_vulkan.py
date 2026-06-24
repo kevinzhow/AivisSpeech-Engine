@@ -7,10 +7,12 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
 import uuid
+import wave as wave_module
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -87,6 +89,7 @@ class _BenchmarkRecord:
     rtf: float | None
     peak_abs: float
     backend_timings: dict[str, float | int | str | None] | None = None
+    audio_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -272,6 +275,86 @@ def _build_query_specs(
     return query_specs
 
 
+def _audio_artifact_path(
+    *,
+    audio_output_dir: Path,
+    backend_name: str,
+    text_index: int,
+    style_id: StyleId | int,
+    run_index: int,
+) -> Path:
+    return (
+        audio_output_dir
+        / f"{backend_name}_style{int(style_id)}_text{text_index:02d}_run{run_index:02d}.m4a"
+    )
+
+
+def _write_pcm16_wav(
+    *,
+    wav_path: Path,
+    audio: np.ndarray,
+    sample_rate: int,
+) -> None:
+    samples = np.asarray(audio, dtype=np.float32)
+    if samples.ndim == 1:
+        channel_count = 1
+    elif samples.ndim == 2:
+        channel_count = int(samples.shape[1])
+    else:
+        raise ValueError(f"Unsupported audio shape: {samples.shape}")
+
+    clipped_samples = np.clip(samples, -1.0, 1.0)
+    pcm16_samples = (clipped_samples * 32767.0).astype("<i2")
+    with wave_module.open(str(wav_path), "wb") as wav_file:
+        wav_file.setnchannels(channel_count)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(pcm16_samples.tobytes())
+
+
+def _write_aac_audio_artifact(
+    *,
+    output_path: Path,
+    audio: np.ndarray,
+    sample_rate: int,
+) -> None:
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        raise RuntimeError(
+            "ffmpeg is required for --audio_output_dir AAC artifacts."
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    wav_path = output_path.with_name(f"{output_path.name}.tmp.wav")
+    try:
+        _write_pcm16_wav(
+            wav_path=wav_path,
+            audio=audio,
+            sample_rate=sample_rate,
+        )
+        subprocess.run(
+            [
+                ffmpeg_path,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(wav_path),
+                "-map_metadata",
+                "-1",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                str(output_path),
+            ],
+            check=True,
+        )
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+
 def _run_backend(
     *,
     backend_name: str,
@@ -279,6 +362,7 @@ def _run_backend(
     query_specs: list[_QuerySpec],
     warmup_runs: int,
     measured_runs: int,
+    audio_output_dir: Path | None = None,
 ) -> list[_BenchmarkRecord]:
     for _ in range(warmup_runs):
         for query_spec in query_specs:
@@ -290,7 +374,7 @@ def _run_backend(
 
     records: list[_BenchmarkRecord] = []
     for run_index in range(measured_runs):
-        for query_spec in query_specs:
+        for text_index, query_spec in enumerate(query_specs):
             start_time = time.perf_counter()
             wave = engine.synthesize_wave(
                 query_spec.audio_query,
@@ -300,6 +384,20 @@ def _run_backend(
             elapsed_seconds = time.perf_counter() - start_time
             output_samples = int(wave.shape[0])
             output_duration_seconds = output_samples / 44100
+            audio_path: Path | None = None
+            if audio_output_dir is not None:
+                audio_path = _audio_artifact_path(
+                    audio_output_dir=audio_output_dir,
+                    backend_name=backend_name,
+                    text_index=text_index,
+                    style_id=query_spec.style_id,
+                    run_index=run_index,
+                )
+                _write_aac_audio_artifact(
+                    output_path=audio_path,
+                    audio=wave,
+                    sample_rate=44100,
+                )
             records.append(
                 _BenchmarkRecord(
                     backend=backend_name,
@@ -316,6 +414,7 @@ def _run_backend(
                     ),
                     peak_abs=float(np.max(np.abs(wave))) if output_samples > 0 else 0.0,
                     backend_timings=_extract_backend_timings(engine),
+                    audio_path=str(audio_path) if audio_path is not None else None,
                 )
             )
     return records
@@ -1052,6 +1151,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ggml_native_library_path", type=Path)
     parser.add_argument("--bert_cache_dir", type=Path)
     parser.add_argument("--output_json", type=Path)
+    parser.add_argument(
+        "--audio_output_dir",
+        type=Path,
+        help=(
+            "Optional directory for per-record AAC audio artifacts. Encoding "
+            "happens after synthesis timing and is not included in RTF."
+        ),
+    )
     parser.add_argument("--sidecar_log_path", type=Path)
     parser.add_argument("--ggml_model_name")
     parser.add_argument("--ggml_jp_bert_model_name")
@@ -1197,6 +1304,8 @@ def main() -> None:
     tmp_path.mkdir(parents=True, exist_ok=True)
 
     sidecar_log_path = args.sidecar_log_path or tmp_path / "tts-cpp-sidecar.log"
+    if args.audio_output_dir is not None:
+        args.audio_output_dir.mkdir(parents=True, exist_ok=True)
     query_engine: StyleBertVITS2TTSEngine | None = None
     onnx_engines: list[StyleBertVITS2TTSEngine] = []
     ggml_engines: list[StyleBertVITS2TTSEngine] = []
@@ -1262,6 +1371,7 @@ def main() -> None:
                     query_specs=query_specs,
                     warmup_runs=args.warmup_runs,
                     measured_runs=args.runs,
+                    audio_output_dir=args.audio_output_dir,
                 )
             )
         sidecar_diagnostics: dict[str, dict[str, Any]] = {}
@@ -1321,6 +1431,7 @@ def main() -> None:
                     query_specs=query_specs,
                     warmup_runs=args.warmup_runs,
                     measured_runs=args.runs,
+                    audio_output_dir=args.audio_output_dir,
                 )
             )
 
@@ -1403,6 +1514,14 @@ def main() -> None:
                     else None
                 ),
                 "sidecar_logs": sidecar_logs,
+                "audio_output_dir": (
+                    str(args.audio_output_dir)
+                    if args.audio_output_dir is not None
+                    else None
+                ),
+                "audio_format": (
+                    "aac" if args.audio_output_dir is not None else None
+                ),
                 "sidecar_diagnostics": sidecar_diagnostics,
                 "ggml_backends": [
                     ggml_backend_spec.name for ggml_backend_spec in ggml_backend_specs

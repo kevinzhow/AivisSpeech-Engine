@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from tools.benchmark_style_bert_vits2_ggml_vulkan import (
+    _audio_artifact_path,
     _BenchmarkRecord,
     _build_benchmark_profile,
     _evaluate_performance_gates,
@@ -87,6 +88,24 @@ def test_summarize_by_text_keeps_short_sentence_overhead_visible() -> None:
     assert summary["short"]["ggml-vulkan"]["mean_rtf"] == pytest.approx(0.5)
     assert summary["long"]["onnx-cpu"]["mean_rtf"] == pytest.approx(0.2)
     assert summary["long"]["ggml-vulkan"]["mean_rtf"] == pytest.approx(0.1)
+
+
+def test_audio_artifact_path_is_stable_for_benchmark_records(
+    tmp_path: Path,
+) -> None:
+    """AAC artifact names are deterministic per backend/text/run result."""
+
+    audio_path = _audio_artifact_path(
+        audio_output_dir=tmp_path,
+        backend_name="ggml-vulkan-jp-bert-native",
+        text_index=2,
+        style_id=1,
+        run_index=3,
+    )
+
+    assert audio_path == (
+        tmp_path / "ggml-vulkan-jp-bert-native_style1_text02_run03.m4a"
+    )
 
 
 def test_summarize_backend_timings_by_text_reports_payload_overhead() -> None:

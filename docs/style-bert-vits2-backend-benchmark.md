@@ -60,14 +60,14 @@ actual providers. This matters because ONNX Runtime can expose
 `CUDAExecutionProvider` but still fall back to CPU if compatible CUDA/cuDNN
 runtime libraries are missing.
 
-## Results
+## Linux Vulkan Results
 
 | text length | ONNX CPU RTF | ONNX CUDA RTF | ggml Vulkan AMD 780M RTF | ggml Vulkan RTX 3060 RTF |
 | --- | ---: | ---: | ---: | ---: |
-| short | `0.371` | `0.271` | `0.228` | `0.147` |
-| medium | `0.281` | `0.178` | `0.180` | `0.102` |
-| long | `0.203` | `0.067` | `0.128` | `0.064` |
-| overall mean | `0.285` | `0.172` | `0.179` | `0.104` |
+| short | `0.318` | `0.278` | `0.251` | `0.146` |
+| medium | `0.287` | `0.177` | `0.197` | `0.102` |
+| long | `0.208` | `0.067` | `0.136` | `0.063` |
+| overall mean | `0.271` | `0.174` | `0.195` | `0.104` |
 
 Interpretation:
 
@@ -79,11 +79,27 @@ Interpretation:
   still the best overall result in this run and is effectively tied with ONNX
   CUDA on the long sentence.
 
-The table uses `/tmp/aivis-style-bert-vits2-benchmark-amd780m-final.json` for
+This 2026-06-25 rerun pulled AivisSpeech-Engine to `1e079d9`, pulled TTS.cpp to
+`f389a96`, updated the TTS.cpp `ggml` submodule to `a9b84478`, and rebuilt both
+the native shared library and Vulkan `tts-server`. The table uses
+`/tmp/aivis-style-bert-vits2-benchmark-20260625/amd780m.json` for
 the ONNX CPU, ONNX CUDA, and AMD 780M ggml columns, and
-`/tmp/aivis-style-bert-vits2-benchmark-rtx3060-final.json` for the RTX 3060
+`/tmp/aivis-style-bert-vits2-benchmark-20260625/rtx3060.json` for the RTX 3060
 ggml column. The RTX 3060 run also repeated the ONNX baselines; those values are
 stored in the JSON artifact and were close to the AMD-run baseline values.
+
+## Linux Vulkan Audio Preview
+
+Each preview is the `run00` AAC artifact for that backend and text. The full
+benchmark generated three measured AAC runs per backend/text; `--audio_output_dir`
+records each generated path in `records[].audio_path`. AAC encoding runs after
+the synthesis timer, so it is not included in RTF.
+
+| text length | ONNX CPU | ONNX CUDA | ggml Vulkan AMD 780M | ggml Vulkan RTX 3060 |
+| --- | --- | --- | --- | --- |
+| short | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-ryzen8845hs_onnx-cpu_short.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-ryzen8845hs_onnx-cpu_short.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_onnx-cuda_short.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_onnx-cuda_short.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-amd780m_ggml-vulkan-native_short.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-amd780m_ggml-vulkan-native_short.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_ggml-vulkan-native_short.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_ggml-vulkan-native_short.m4a) |
+| medium | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-ryzen8845hs_onnx-cpu_medium.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-ryzen8845hs_onnx-cpu_medium.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_onnx-cuda_medium.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_onnx-cuda_medium.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-amd780m_ggml-vulkan-native_medium.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-amd780m_ggml-vulkan-native_medium.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_ggml-vulkan-native_medium.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_ggml-vulkan-native_medium.m4a) |
+| long | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-ryzen8845hs_onnx-cpu_long.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-ryzen8845hs_onnx-cpu_long.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_onnx-cuda_long.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_onnx-cuda_long.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-amd780m_ggml-vulkan-native_long.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-amd780m_ggml-vulkan-native_long.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_ggml-vulkan-native_long.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/ubuntu-rtx3060_ggml-vulkan-native_long.m4a) |
 
 ## Windows Intel Arc B580 Native Binding Result
 
@@ -284,8 +300,9 @@ uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --text 'これは少し長めの文章です。GPUバックエンドの推論速度と音声品質を確認しています。' \
   --warmup_runs 1 \
   --runs 3 \
-  --output_json /tmp/aivis-style-bert-vits2-benchmark-amd780m-final.json \
-  > /tmp/aivis-style-bert-vits2-benchmark-amd780m-final.log 2>&1
+  --audio_output_dir /tmp/aivis-style-bert-vits2-benchmark-20260625/amd780m-audio \
+  --output_json /tmp/aivis-style-bert-vits2-benchmark-20260625/amd780m.json \
+  > /tmp/aivis-style-bert-vits2-benchmark-20260625/amd780m.log 2>&1
 ```
 
 RTX 3060 Vulkan run:
@@ -312,8 +329,9 @@ uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --text 'これは少し長めの文章です。GPUバックエンドの推論速度と音声品質を確認しています。' \
   --warmup_runs 1 \
   --runs 3 \
-  --output_json /tmp/aivis-style-bert-vits2-benchmark-rtx3060-final.json \
-  > /tmp/aivis-style-bert-vits2-benchmark-rtx3060-final.log 2>&1
+  --audio_output_dir /tmp/aivis-style-bert-vits2-benchmark-20260625/rtx3060-audio \
+  --output_json /tmp/aivis-style-bert-vits2-benchmark-20260625/rtx3060.json \
+  > /tmp/aivis-style-bert-vits2-benchmark-20260625/rtx3060.log 2>&1
 ```
 
 macOS Metal local run:
