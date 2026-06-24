@@ -35,7 +35,7 @@ is better.
 | ggml Vulkan iGPU | AMD Radeon 780M Graphics (RADV PHOENIX), integrated GPU, vendor `0x1002`, device `0x1900`, Vulkan API `1.4.335`, Mesa `26.0.3-1ubuntu1`, UMA `1`, fp16 `0`, bf16 `0`, warp size `64`, shared memory `65536`, int dot `1` |
 | ggml Vulkan NVIDIA | NVIDIA GeForce RTX 3060, discrete GPU, vendor `0x10de`, device `0x2504`, Vulkan API `1.4.329`, driver `595.71.05`, VRAM `12288 MiB`, PCI bus `00000000:01:00.0`, power limit `170 W`, UMA `0`, fp16 `0`, bf16 `1`, warp size `32`, shared memory `49152`, int dot `1` |
 | macOS Metal host | macOS 27.0 build `26A5368g`, Apple M1 Pro, 10 CPU cores, 32 GiB RAM |
-| ggml Metal | Apple M1 Pro, TTS.cpp `8e26ac0`, ggml `b6ad57d8`, `BUILD_SHARED_LIBS=ON`, `GGML_METAL=ON`, `GGML_METAL_NO_RESIDENCY=1`, Style-Bert AOT simdgroup-half Metal ConvTranspose1D enabled by default |
+| ggml Metal | Apple M1 Pro, TTS.cpp `a120f9e`, ggml `a78c352b`, `BUILD_SHARED_LIBS=ON`, `GGML_METAL=ON`, `GGML_METAL_NO_RESIDENCY=1`, Style-Bert AOT simdgroup-half Metal ConvTranspose1D and fused decoder Conv1D epilogue enabled by default |
 
 The benchmark pinned the TTS.cpp Vulkan device with `GGML_VK_VISIBLE_DEVICES`.
 The captured TTS.cpp device evidence was:
@@ -203,30 +203,34 @@ This run used the TTS.cpp native C API from `libtts.dylib`, not the managed
 `tts-server` sidecar. It used `kevinzhow/style-bert-vits2-gguf` for the
 preconverted `mao-full-sdp.gguf` and JP-BERT GGUF artifacts. The TTS.cpp build
 includes the Style-Bert decoder-specific Metal AOT simdgroup-half
-ConvTranspose1D path from TTS.cpp `8e26ac0` / ggml `b6ad57d8`. It decomposes
+ConvTranspose1D path from TTS.cpp `a120f9e` / ggml `a78c352b`. It decomposes
 output by stride phase, maps each phase to a matrix multiply tile, uses half
 input/weight tiles with fp32 accumulation, writes cropped output directly, and
-fuses the bias add. The previous f32 phase-tiled path remains available with
-`STYLE_BERT_VITS2_METAL_CONV_TRANSPOSE_1D_KERNEL=phase_32x32_k128`.
+fuses the bias add. The decoder now also fuses the large resblock Conv1D
+epilogues: pre-LeakyReLU input transform, Conv1D, bias add, and optional
+residual add are emitted as one Kokoro Conv1D Metal op. The previous f32
+phase-tiled ConvTranspose path remains available with
+`STYLE_BERT_VITS2_METAL_CONV_TRANSPOSE_1D_KERNEL=phase_32x32_k128`; the fused
+Conv1D epilogue can be disabled with `STYLE_BERT_VITS2_METAL_FUSED_CONV1D=0`.
 
 | text length | ONNX CPU RTF | ggml Metal native RTF | Metal/ONNX CPU ratio |
 | --- | ---: | ---: | ---: |
-| short | `0.297` | `0.215` | `0.724` |
-| medium | `0.275` | `0.153` | `0.556` |
-| long | `0.244` | `0.127` | `0.523` |
-| overall mean | `0.272` | `0.165` | `0.607` |
+| short | `0.297` | `0.215` | `0.725` |
+| medium | `0.274` | `0.154` | `0.561` |
+| long | `0.245` | `0.126` | `0.514` |
+| overall mean | `0.272` | `0.165` | `0.606` |
 
 Native timing breakdown for `ggml-metal-jp-bert-native`:
 
 | text length | frontend seconds | native synthesis seconds | native JP-BERT seconds |
 | --- | ---: | ---: | ---: |
-| short | `0.056` | `0.150` | `0.055` |
-| medium | `0.053` | `0.208` | `0.053` |
-| long | `0.075` | `0.888` | `0.073` |
+| short | `0.055` | `0.151` | `0.055` |
+| medium | `0.052` | `0.211` | `0.052` |
+| long | `0.076` | `0.874` | `0.074` |
 
 The result JSON is
-`/tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-simdgroup.json`; the log
-is `/tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-simdgroup.log`. The
+`/tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d.json`; the
+log is `/tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d.log`. The
 log showed:
 
 ```text
@@ -237,26 +241,46 @@ Using TTS.cpp ggml/metal native binding at /Users/kevinzhow/Github/TTS.cpp/build
 kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k16_s8_ic512_crop4_f32
 kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k16_s8_ic256_crop4_f32
 kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k8_s2_ic128_crop3_f32
+kernel_kokoro_conv_1d_f32
 kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k2_s2_ic64_crop0_f32
 kernel_style_bert_vits2_conv_transpose_1d_phase_simdgroup_half_aot_k2_s2_ic32_crop0_f32
 ```
+
+The AAC previews below are representative `run00` artifacts from the same
+backend and text set. AAC encoding runs after the synthesis timer, so these
+files are not included in the RTF values above.
+
+| text length | ONNX CPU | ggml Metal native |
+| --- | --- | --- |
+| short | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_short.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_short.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_short.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_short.m4a) |
+| medium | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_medium.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_medium.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_medium.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_medium.m4a) |
+| long | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_long.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_onnx-cpu_long.m4a) | <audio controls preload="none" src="res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_long.m4a"></audio><br>[AAC](res/style-bert-vits2-benchmark-20260625/representative-audio/macos-m1pro_ggml-metal-native_long.m4a) |
 
 The AOT simdgroup-half ConvTranspose1D path is enabled by default when the native
 binding sets `TTS_BACKEND=metal` on a Metal device with simdgroup matrix support.
 The f32 phase-tiled and scalar fused paths are retained as explicit rollback
 modes. A one-text native binding probe with `--warmup_runs 1 --runs 3` on the
-same long input compared the f32 phase-tiled path with the new default:
+same long input compared the f32 phase-tiled path, AOT without Conv1D epilogue
+fusion, and the new default:
 
-| Metal ConvTranspose1D path | RTF | native synthesis seconds | decoder seconds | decoder nodes |
+| Metal decoder path | RTF | native synthesis seconds | decoder seconds | decoder nodes |
 | --- | ---: | ---: | ---: | ---: |
 | `STYLE_BERT_VITS2_METAL_CONV_TRANSPOSE_1D_KERNEL=phase_32x32_k128` | `0.141` | `1.454` | `0.993` | `428` |
-| default AOT simdgroup-half | `0.135` | `1.384` | `0.939` | `428` |
+| AOT simdgroup-half, `STYLE_BERT_VITS2_METAL_FUSED_CONV1D=0` | `0.137` | `1.406` | `0.939` | `428` |
+| default AOT simdgroup-half + fused Conv1D epilogue | `0.133` | `1.364` | `0.896` | `248` |
 
-For that probe, the default AOT simdgroup-half path reduced native synthesis
-time by `4.8%`, RTF by `4.4%`, and decoder time by `5.4%` compared with the f32
-phase-tiled path. The final decoder fixture stayed within tolerance:
-`max_abs=0.000594173`, `rms=7.4558e-05`. The f32 phase-tiled rollback fixture
-reported `max_abs=0.000498002`, `rms=7.29653e-05`.
+For that one-text probe, the fused Conv1D epilogue reduced native synthesis time
+by `3.0%`, RTF by `2.8%`, and decoder time by `4.6%` compared with the same AOT
+ConvTranspose path with `STYLE_BERT_VITS2_METAL_FUSED_CONV1D=0`. On the
+three-text no-AAC benchmark, the same A/B changed overall Metal RTF from
+`0.16568` to `0.16367`, long-text native synthesis from `0.89849s` to
+`0.87558s`, and long-text decoder time from about `636ms` to `611ms`.
+
+The default fused decoder fixture stayed within tolerance:
+`max_abs=0.000594173`, `rms=7.4558e-05`. The f32 phase-tiled ConvTranspose
+rollback fixture reported `max_abs=0.000498002`, `rms=7.29653e-05`; the
+`STYLE_BERT_VITS2_METAL_FUSED_CONV1D=0` rollback fixture reported the same final
+decoder tolerance as the default fused path.
 
 ## Reproduction
 
@@ -423,8 +447,14 @@ uv run --group dev python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --text 'これは少し長めの文章です。GPUバックエンドの推論速度と音声品質を確認しています。' \
   --warmup_runs 1 \
   --runs 3 \
-  --output_json /tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-simdgroup.json \
-  > /tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-simdgroup.log 2>&1
+  --output_json /tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d.json \
+  > /tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d.log 2>&1
+```
+
+To regenerate the macOS AAC preview files, rerun the same command with:
+
+```bash
+  --audio_output_dir /tmp/aivis-style-bert-vits2-benchmark-metal-native-aot-fused-conv1d-audio
 ```
 
 The Metal native run is labeled as `ggml-metal-jp-bert-native` in the JSON
