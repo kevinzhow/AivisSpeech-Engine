@@ -41,6 +41,9 @@ def _write_bundle_files(root: Path, *, include_jp_bert_gguf: bool = True) -> Non
 
 
 def _write_bundle_manifest(root: Path, **overrides: object) -> None:
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        default_real_artifact_bundle_matrix_id,
+    )
     from onnxruntime_ep_aivis_ggml.cache import build_compatibility_matrix
 
     manifest = {
@@ -57,7 +60,7 @@ def _write_bundle_manifest(root: Path, **overrides: object) -> None:
             "synthesis_style_vectors": "synthesis/style_vectors.npy",
         },
         "compatibility_matrix": build_compatibility_matrix(),
-        "matrix_id": "ort-1.26.0-tts-abi1-gguf1",
+        "matrix_id": default_real_artifact_bundle_matrix_id(),
         "onnxruntime": {
             "plugin_ep_api_version": 26,
             "tested_runtime_version": "1.26.0",
@@ -135,7 +138,9 @@ def test_validate_real_artifact_bundle_accepts_versioned_manifest(
     report = build_real_artifact_bundle_report(tmp_path, require_manifest=True)
 
     assert report["valid"] is True
-    assert report["manifest"]["matrix_id"] == "ort-1.26.0-tts-abi1-gguf1"
+    assert report["manifest"]["matrix_id"] == (
+        "ort-1.26.0-epapi26-provider0.1.0-tts-abi1-gguf1"
+    )
     assert report["manifest"]["onnxruntime"] == {
         "plugin_ep_api_version": 26,
         "tested_runtime_version": "1.26.0",
@@ -219,6 +224,23 @@ def test_validate_real_artifact_bundle_rejects_compatibility_matrix_drift(
 
     assert validate_real_artifact_bundle(tmp_path, require_manifest=True) == (
         "bundle_manifest_compatibility_matrix_mismatch",
+    )
+
+
+def test_validate_real_artifact_bundle_rejects_matrix_id_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        validate_real_artifact_bundle,
+    )
+
+    _write_bundle_files(tmp_path)
+    _write_bundle_manifest(tmp_path, matrix_id="nightly-ort126-ttsabi1")
+
+    assert validate_real_artifact_bundle(tmp_path, require_manifest=True) == (
+        "bundle_manifest_matrix_id_mismatch",
     )
 
 
@@ -327,6 +349,42 @@ def test_write_artifact_bundle_manifest_cli_outputs_portable_report(
 ) -> None:
     _add_external_package_src(monkeypatch)
     from onnxruntime_ep_aivis_ggml import cli
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        default_real_artifact_bundle_matrix_id,
+    )
+
+    _write_bundle_files(tmp_path)
+    matrix_id = default_real_artifact_bundle_matrix_id()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "write_artifact_bundle_manifest.py",
+            str(tmp_path),
+            "--matrix-id",
+            matrix_id,
+        ],
+    )
+
+    cli.write_artifact_bundle_manifest_main()
+
+    report = json.loads(capsys.readouterr().out)
+    manifest = json.loads(
+        (tmp_path / "aivis_ggml_ep_bundle.json").read_text(encoding="utf-8")
+    )
+    assert report["valid"] is True
+    assert report["manifest"]["matrix_id"] == matrix_id
+    assert manifest["matrix_id"] == matrix_id
+    assert str(tmp_path) not in json.dumps(report, sort_keys=True)
+    assert str(tmp_path) not in json.dumps(manifest, sort_keys=True)
+
+
+def test_write_artifact_bundle_manifest_cli_rejects_custom_matrix_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cli
 
     _write_bundle_files(tmp_path)
     monkeypatch.setattr(
@@ -340,17 +398,8 @@ def test_write_artifact_bundle_manifest_cli_outputs_portable_report(
         ],
     )
 
-    cli.write_artifact_bundle_manifest_main()
-
-    report = json.loads(capsys.readouterr().out)
-    manifest = json.loads(
-        (tmp_path / "aivis_ggml_ep_bundle.json").read_text(encoding="utf-8")
-    )
-    assert report["valid"] is True
-    assert report["manifest"]["matrix_id"] == "nightly-ort126-ttsabi1"
-    assert manifest["matrix_id"] == "nightly-ort126-ttsabi1"
-    assert str(tmp_path) not in json.dumps(report, sort_keys=True)
-    assert str(tmp_path) not in json.dumps(manifest, sort_keys=True)
+    with pytest.raises(SystemExit):
+        cli.write_artifact_bundle_manifest_main()
 
 
 def test_package_artifact_bundle_cli_outputs_portable_sha_report(

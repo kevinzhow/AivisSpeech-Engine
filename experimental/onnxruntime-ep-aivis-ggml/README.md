@@ -465,8 +465,11 @@ aivis-ggml-onnx-ep-write-artifact-bundle-manifest /path/to/bundle/root --overwri
 ```
 
 The writer records the current provider/ORT/TTS.cpp/GGUF compatibility contract,
-adds optional JP-BERT artifacts only when their files are present, and then runs
-the same bundle validator. Its JSON report uses portable relative paths only.
+derives the canonical `matrix_id` from that contract, adds optional JP-BERT
+artifacts only when their files are present, and then runs the same bundle
+validator. Its JSON report uses portable relative paths only. Custom
+`matrix_id` values are rejected; use archive names or release metadata for
+nightly labels, not the compatibility contract.
 
 Package a validated bundle for upload and record the SHA-256 for CI:
 
@@ -605,9 +608,10 @@ without local paths. Abbreviated example:
 }
 ```
 
-The validator checks the full compatibility matrix, every listed artifact path,
-file presence, byte size, and SHA-256. If an optional artifact is listed in the
-manifest, the file must be present and must match its digest.
+The validator checks the canonical matrix id, full compatibility matrix, every
+listed artifact path, file presence, byte size, and SHA-256. If an optional
+artifact is listed in the manifest, the file must be present and must match its
+digest.
 
 The workflow builds the native Plugin EP against ONNX Runtime 1.26 headers,
 smoke-registers it, validates the real-artifact bundle, runs `compile_cache.py`

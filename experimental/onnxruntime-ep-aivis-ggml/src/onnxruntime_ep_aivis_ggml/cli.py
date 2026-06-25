@@ -496,7 +496,7 @@ def write_artifact_bundle_manifest_main() -> None:
         "--matrix-id",
         default=None,
         help=(
-            "Compatibility matrix id to record. Defaults to the current "
+            "Compatibility matrix id to assert. It must match the current "
             f"provider contract: {default_real_artifact_bundle_matrix_id()}."
         ),
     )
@@ -513,7 +513,7 @@ def write_artifact_bundle_manifest_main() -> None:
             matrix_id=args.matrix_id,
             overwrite=args.overwrite,
         )
-    except FileExistsError as ex:
+    except (FileExistsError, ValueError) as ex:
         parser.error(str(ex))
 
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
@@ -536,8 +536,8 @@ def package_artifact_bundle_main() -> None:
         "--matrix-id",
         default=None,
         help=(
-            "Compatibility matrix id to record when generating the manifest. "
-            f"Defaults to: {default_real_artifact_bundle_matrix_id()}."
+            "Compatibility matrix id to assert when generating the manifest. "
+            f"It must match: {default_real_artifact_bundle_matrix_id()}."
         ),
     )
     parser.add_argument(
@@ -560,7 +560,7 @@ def package_artifact_bundle_main() -> None:
             overwrite=args.overwrite,
             overwrite_manifest=args.overwrite_manifest,
         )
-    except FileExistsError as ex:
+    except (FileExistsError, ValueError) as ex:
         parser.error(str(ex))
 
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))

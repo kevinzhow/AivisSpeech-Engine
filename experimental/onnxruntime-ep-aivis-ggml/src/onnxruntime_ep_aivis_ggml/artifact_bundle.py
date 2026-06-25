@@ -51,6 +51,16 @@ def default_real_artifact_bundle_matrix_id() -> str:
     )
 
 
+def _resolve_real_artifact_bundle_matrix_id(matrix_id: str | None) -> str:
+    expected = default_real_artifact_bundle_matrix_id()
+    if matrix_id is None or matrix_id == expected:
+        return expected
+    raise ValueError(
+        "real-artifact bundle matrix_id must match the current provider "
+        f"contract: {expected}"
+    )
+
+
 def build_real_artifact_bundle_manifest(
     bundle_dir: str | Path,
     *,
@@ -68,7 +78,7 @@ def build_real_artifact_bundle_manifest(
         "artifact_digests": _build_artifact_digests(root, artifacts),
         "artifacts": artifacts,
         "compatibility_matrix": build_compatibility_matrix(),
-        "matrix_id": matrix_id or default_real_artifact_bundle_matrix_id(),
+        "matrix_id": _resolve_real_artifact_bundle_matrix_id(matrix_id),
         "onnxruntime": {
             "plugin_ep_api_version": ORT_PLUGIN_EP_API_VERSION,
             "tested_runtime_version": TESTED_ORT_RUNTIME_VERSION,
@@ -293,6 +303,8 @@ def _validate_manifest(
     )
     if not isinstance(manifest.get("matrix_id"), str) or not manifest["matrix_id"]:
         errors.append("bundle_manifest_matrix_id_invalid")
+    elif manifest["matrix_id"] != default_real_artifact_bundle_matrix_id():
+        errors.append("bundle_manifest_matrix_id_mismatch")
 
     provider = manifest.get("provider")
     if not isinstance(provider, dict):

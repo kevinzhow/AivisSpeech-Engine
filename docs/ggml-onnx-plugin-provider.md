@@ -308,11 +308,12 @@ logic back into AivisSpeech Engine.
      `aivis_ggml_ep_bundle.json`, which records provider version, ORT runtime
      version/API, TTS.cpp runtime ABI, GGUF schema version, matrix id, and
      the full compatibility matrix, plus portable artifact paths and
-     per-artifact size/SHA-256 digests.
+     per-artifact size/SHA-256 digests. The matrix id is derived from the
+     current provider contract and must match that contract during validation.
    - `aivis-ggml-onnx-ep-write-artifact-bundle-manifest` generates that bundle
      manifest from the fixed artifact layout, records the current compatibility
-     contract, includes optional JP-BERT files only when present, and validates
-     the result before publishing.
+     contract, rejects custom matrix ids, includes optional JP-BERT files only
+     when present, and validates the result before publishing.
    - `aivis-ggml-onnx-ep-package-artifact-bundle` creates the deterministic
      hosted `tar.gz` and reports the SHA-256 used by the scheduled workflow
      secret, so artifact publishing no longer depends on ad hoc local tar
