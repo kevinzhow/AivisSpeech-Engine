@@ -29,6 +29,8 @@ on:
       artifact_bundle_sha256:
         description: "Optional SHA-256 for artifact_bundle_url."
         required: false
+  schedule:
+    - cron: "17 3 * * 1"
 
 defaults:
   run:
@@ -102,7 +104,7 @@ jobs:
 
       - name: <Setup> Resolve real-artifact bundle input
         id: real-artifacts
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
         env:
           INPUT_ARTIFACT_BUNDLE_URL: ${{ inputs.artifact_bundle_url }}
           INPUT_ARTIFACT_BUNDLE_SHA256: ${{ inputs.artifact_bundle_sha256 }}

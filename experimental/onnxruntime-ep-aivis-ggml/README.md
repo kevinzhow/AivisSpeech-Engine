@@ -242,13 +242,15 @@ manifests.
    version drift returns prefer-recompile, unrelated EP metadata is
    not-applicable, and Aivis contract drift is unsupported. The dedicated
    GitHub Actions workflow covers public Plugin EP checks and can run the
-   real-artifact compiler/EPContext matrix on manual dispatch. The package now
-   also owns the JP-BERT GGUF writer for TTS.cpp's Style-Bert-VITS2 JP-BERT
-   schema, so JP-BERT can be generated from the ONNX export plus adjacent
-   `config.json`/tokenizer files, or from a Hugging Face JP-BERT directory.
-   Remaining work is expanding the hosted matrix across more
-   ORT/TTS.cpp/GGUF schema versions and running the JP-BERT writer against
-   pinned production artifacts whenever those artifacts are available.
+   real-artifact compiler/EPContext matrix on manual dispatch or the weekly
+   scheduled path when a pinned artifact bundle secret is configured. The
+   package now also owns the JP-BERT GGUF writer for TTS.cpp's
+   Style-Bert-VITS2 JP-BERT schema, so JP-BERT can be generated from the ONNX
+   export plus adjacent `config.json`/tokenizer files, or from a Hugging Face
+   JP-BERT directory. A real-artifact JP-BERT parity fixture compares Plugin EP
+   `[tokens, 1024]` features against ONNX CPU. Remaining work is expanding the
+   hosted matrix across more ORT/TTS.cpp/GGUF schema versions and configuring
+   the production artifact bundle secrets.
 
 ## Native Build
 
@@ -486,10 +488,11 @@ probe (`1,5,6,2`), `max_abs_diff <= 0.05`, `rmse <= 0.005`, and
 `AIVIS_GGML_ONNX_EP_JP_BERT_MIN_SNR_DB`.
 
 The hosted workflow `.github/workflows/test-onnxruntime-ggml-ep.yml` runs the
-public Plugin EP checks on push and pull request. On manual dispatch it can also
-run the real-artifact compiler and EPContext matrix when given a bundle URL via
-the `artifact_bundle_url` input or `AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL`
-secret. The bundle must unpack to this portable layout:
+public Plugin EP checks on push and pull request. On manual dispatch or the
+weekly scheduled run, it can also run the real-artifact compiler and EPContext
+matrix when given a bundle URL via the `artifact_bundle_url` input or the
+`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL` secret. The bundle must unpack to this
+portable layout:
 
 ```text
 lib/libtts.so
@@ -510,7 +513,5 @@ smoke-registers it, runs `compile_cache.py` with the synthesis files, generates
 present and the GGUF is missing, runs the JP-BERT writer fixture when
 `jp_bert/model.onnx` is present, runs the JP-BERT ONNX CPU parity fixture when
 both JP-BERT ONNX and GGUF artifacts are present, and runs the EPContext
-round-trip fixture. The
-optional
-`artifact_bundle_sha256` input or
+round-trip fixture. The optional `artifact_bundle_sha256` input or
 `AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` secret pins the downloaded bundle.

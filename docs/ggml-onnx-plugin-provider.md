@@ -303,22 +303,21 @@ logic back into AivisSpeech Engine.
      ORT model-package metadata.
    - Hosted CI now has a dedicated `Test ONNX Runtime GGML EP` workflow. Push
      and pull request runs cover Python checks, default Plugin EP integration
-     tests, native build, and native smoke registration. Manual dispatch can
-     download a real-artifact bundle, run the synthesis compiler, generate the
-     JP-BERT GGUF from `jp_bert/model.onnx` when the bundle does not already
-     include `jp_bert/model.gguf`, run the JP-BERT writer fixture, compare
-     JP-BERT Plugin EP feature output against ONNX CPU, and run the EPContext
-     round-trip matrix.
+     tests, native build, and native smoke registration. Manual dispatch and
+     weekly scheduled runs can download a real-artifact bundle, run the
+     synthesis compiler, generate the JP-BERT GGUF from `jp_bert/model.onnx`
+     when the bundle does not already include `jp_bert/model.gguf`, run the
+     JP-BERT writer fixture, compare JP-BERT Plugin EP feature output against
+     ONNX CPU, and run the EPContext round-trip matrix.
    - The package now owns a TTS.cpp-compatible Style-Bert-VITS2 JP-BERT GGUF
      writer. It maps Hugging Face DeBERTa tensor names into TTS.cpp's compact
      JP-BERT tensor schema, writes the tokenizer/config metadata consumed by
      TTS.cpp, and fails before writing if any tensor that TTS.cpp will load is
      missing. It supports JP-BERT ONNX initializers and Hugging Face checkpoint
      directories (`model.safetensors` or `pytorch_model.bin`).
-   - Remaining production work: expand the hosted real-artifact matrix across
-     ORT/TTS.cpp/GGUF schema versions and pin a production artifact bundle so
-     the JP-BERT writer/parity fixtures run on a scheduled path, not only on
-     manual dispatch.
+   - Remaining production work: configure a pinned production artifact bundle
+     in repository secrets and expand the hosted real-artifact matrix across
+     ORT/TTS.cpp/GGUF schema versions.
    - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
      TTS.cpp C API version, GGUF schema version, synthesis signature contract,
      and JP-BERT signature contract.
