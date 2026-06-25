@@ -600,22 +600,31 @@ def test_parse_onnx_plugin_ep_specs_can_reuse_ggml_native_library_path(
     ]
 
 
-def test_parse_onnx_plugin_ep_specs_requires_jp_bert_gguf(
+def test_parse_onnx_plugin_ep_specs_claims_jp_bert_without_preconverted_gguf(
     tmp_path: Path,
 ) -> None:
-    """Claiming the JP-BERT graph requires a JP-BERT GGUF path."""
+    """The Engine can prepare JP-BERT GGUF from the JP-BERT ONNX model."""
 
-    with pytest.raises(ValueError, match="jp_bert_gguf_path"):
-        _parse_onnx_plugin_ep_specs(
-            Namespace(
-                onnx_ep_library_path=tmp_path / "libaivis_ggml_onnx_ep.so",
-                onnx_ep_tts_cpp_library_path=tmp_path / "libtts.so",
-                onnx_ep_backend=None,
-                onnx_ep_vulkan_precision=None,
-                jp_bert_gguf_path=None,
-                ggml_native_library_path=None,
-            )
+    specs = _parse_onnx_plugin_ep_specs(
+        Namespace(
+            onnx_ep_library_path=tmp_path / "libaivis_ggml_onnx_ep.so",
+            onnx_ep_tts_cpp_library_path=tmp_path / "libtts.so",
+            onnx_ep_backend=None,
+            onnx_ep_vulkan_precision=None,
+            jp_bert_gguf_path=None,
+            ggml_native_library_path=None,
         )
+    )
+
+    assert specs == [
+        _OnnxPluginEpSpec(
+            name="ggml-vulkan-onnx-ep-jp-bert-native",
+            tts_cpp_backend="vulkan",
+            vulkan_precision="accurate",
+            tts_cpp_library_path=tmp_path / "libtts.so",
+            claim_jp_bert_graph=True,
+        )
+    ]
 
 
 def test_build_onnx_plugin_ep_config_claims_both_supported_graphs(
@@ -639,6 +648,7 @@ def test_build_onnx_plugin_ep_config_claims_both_supported_graphs(
             vulkan_precision="accurate",
             tts_cpp_library_path=tmp_path / "libtts.so",
         ),
+        gguf_path=tmp_path / "mao.gguf",
     )
 
     assert config.library_path == tmp_path / "libaivis_ggml_onnx_ep.so"

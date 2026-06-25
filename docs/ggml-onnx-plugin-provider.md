@@ -72,6 +72,13 @@ AivisSpeech Engine. Graph claim is opt-in: without `claim_synthesis_graph=1`
 or `claim_jp_bert_graph=1`, the provider registers successfully but leaves
 execution on the fallback ONNX providers.
 
+`gguf_path` and `jp_bert_gguf_path` are explicit override paths. When the Engine
+configures the Plugin EP without them, it prepares synthesis GGUF from the
+installed AIVM/AIVMX model and fetches the JP-BERT GGUF from the published
+`kevinzhow/style-bert-vits2-gguf` bundle
+(`frontend/style-bert-vits2-jp-bert.gguf`). This keeps the caller path
+transparent while avoiding lossy JP-BERT ONNX-to-GGUF reconstruction.
+
 ## Provider Behavior
 
 The provider must claim only complete known graphs. It must not claim individual
@@ -194,7 +201,8 @@ Compile rules:
 - With the plugin installed, `get_providers()[0]` for the synthesis session is
   `AivisGgmlExecutionProvider`.
 - JP-BERT ONNX sessions continue to use CPU/CUDA/DML unless
-  `claim_jp_bert_graph=1` and `jp_bert_gguf_path` are provided.
+  `claim_jp_bert_graph=1` is enabled and a JP-BERT GGUF is available through an
+  explicit `jp_bert_gguf_path` or the Engine's prebuilt bundle cache.
 - With `claim_jp_bert_graph=1`, a supported JP-BERT ONNX session is claimed by
   `AivisGgmlExecutionProvider` and returns `[tokens, 1024]` features.
 - JP-BERT feature output is compared against ONNX CPU for matching shape, max
@@ -206,12 +214,12 @@ Compile rules:
 
 The current target is the local import-and-run path:
 
-- Convert or prepare the Aivis synthesis model and JP-BERT model as TTS.cpp
-  compatible GGUF artifacts.
+- Convert or prepare the Aivis synthesis model as a TTS.cpp compatible GGUF
+  artifact, and use the prebuilt JP-BERT GGUF bundle for JP-BERT graph claims.
 - Register `AivisGgmlExecutionProvider` through the generic Aivis ONNX Plugin
   EP options.
-- Load `libtts.so`, `gguf_path`, and `jp_bert_gguf_path` explicitly through
-  provider options.
+- Load `libtts.so`, plus explicit or Engine-prepared `gguf_path` and
+  `jp_bert_gguf_path`, through provider options.
 - Claim only the supported synthesis and JP-BERT graphs.
 - Compare JP-BERT features and synthesis audio against ONNX CPU before treating
   the GGML path as usable.

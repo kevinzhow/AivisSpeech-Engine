@@ -1199,6 +1199,67 @@ def test_materialize_weight_norm_matches_pytorch_dim0_formula(
     )
 
 
+@pytest.mark.parametrize(
+    "target_name",
+    [
+        "style_bert_vits2.text_encoder.style_proj.weight",
+        "style_bert_vits2.te.enc.spk.w",
+        "style_bert_vits2.fl.3.enc.spk.w",
+    ],
+)
+def test_prepare_mapped_tensor_array_transposes_anonymous_matmul_weights(
+    monkeypatch: pytest.MonkeyPatch,
+    target_name: str,
+) -> None:
+    """ONNX MatMul initializers are [in, out], while TTS.cpp stores [out, in]."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml.gguf_writer import prepare_mapped_tensor_array
+
+    array = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+        ],
+        dtype=np.float32,
+    )
+
+    np.testing.assert_array_equal(
+        prepare_mapped_tensor_array(
+            source_name="onnx::MatMul_1",
+            target_name=target_name,
+            array=array,
+        ),
+        array.T,
+    )
+
+
+def test_prepare_mapped_tensor_array_keeps_direct_initializer_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Named PyTorch-style initializers already match the TTS.cpp layout."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml.gguf_writer import prepare_mapped_tensor_array
+
+    array = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+        ],
+        dtype=np.float32,
+    )
+
+    np.testing.assert_array_equal(
+        prepare_mapped_tensor_array(
+            source_name="enc_p.style_proj.weight",
+            target_name="style_bert_vits2.text_encoder.style_proj.weight",
+            array=array,
+        ),
+        array,
+    )
+
+
 def test_prepare_ggml_cache_can_fail_on_incomplete_tensor_mapping(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

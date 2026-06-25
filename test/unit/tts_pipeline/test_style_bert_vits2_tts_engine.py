@@ -604,6 +604,59 @@ def test_configure_onnx_plugin_execution_provider_raises_when_strict(
     assert "Available providers" in str(exc_info.value)
 
 
+def test_prepare_onnx_plugin_jp_bert_provider_options_fills_cache_path(
+    tmp_path: Path,
+) -> None:
+    """JP-BERT GGUF path is prepared before the global BERT ONNX session opens."""
+
+    engine = cast(StyleBertVITS2TTSEngine, object.__new__(StyleBertVITS2TTSEngine))
+    engine.onnx_providers = [
+        (
+            "AivisGgmlExecutionProvider",
+            {
+                "backend": "vulkan",
+                "claim_jp_bert_graph": "1",
+                "claim_synthesis_graph": "1",
+            },
+        ),
+        "CPUExecutionProvider",
+    ]
+    jp_bert_onnx_path = tmp_path / "model_fp16.onnx"
+    engine._resolve_jp_bert_onnx_path = lambda: jp_bert_onnx_path  # noqa: SLF001
+    jp_bert_gguf_path = tmp_path / "jp-bert.gguf"
+
+    class FakeJpBertGgufCache:
+        def ensure(self, *, onnx_path: Path) -> Any:
+            assert onnx_path == jp_bert_onnx_path
+            return SimpleNamespace(gguf_path=jp_bert_gguf_path)
+
+    config = OnnxPluginExecutionProviderConfig(
+        provider_name="AivisGgmlExecutionProvider",
+        provider_options={
+            "backend": "vulkan",
+            "claim_jp_bert_graph": "1",
+            "claim_synthesis_graph": "1",
+        },
+        strict=True,
+    )
+
+    engine._prepare_onnx_plugin_jp_bert_provider_options(  # noqa: SLF001
+        config=config,
+        jp_bert_gguf_cache=cast(Any, FakeJpBertGgufCache()),
+    )
+
+    assert config.provider_options["jp_bert_gguf_path"] == str(jp_bert_gguf_path)
+    assert engine.onnx_providers[0] == (
+        "AivisGgmlExecutionProvider",
+        {
+            "backend": "vulkan",
+            "claim_jp_bert_graph": "1",
+            "claim_synthesis_graph": "1",
+            "jp_bert_gguf_path": str(jp_bert_gguf_path),
+        },
+    )
+
+
 def test_normalize_style_bert_vits2_pcm16_matches_peak_normalization() -> None:
     """GGML output is normalized like Style-Bert-VITS2's ONNX postprocess."""
 

@@ -13,6 +13,7 @@ from typing import Any, Final
 import jaconv
 import numpy as np
 import onnxruntime
+from huggingface_hub import hf_hub_download
 from numpy.typing import NDArray
 from onnxruntime.capi.onnxruntime_pybind11_state import InvalidProtobuf, NoSuchFile
 from style_bert_vits2.constants import (
@@ -32,7 +33,7 @@ from style_bert_vits2.nlp.japanese.mora_list import (
 from style_bert_vits2.nlp.japanese.normalizer import normalize_text
 from style_bert_vits2.nlp.symbols import PUNCTUATIONS
 
-from ..aivm_gguf_cache import AivmGgufCache
+from ..aivm_gguf_cache import AivmGgufCache, JpBertGgufCache
 from ..aivm_manager import AivmManager
 from ..core.core_adapter import CoreAdapter, DeviceSupport
 from ..dev.core.mock import MockCoreWrapper
@@ -150,6 +151,33 @@ def _onnx_provider_name(provider: str | tuple[str, dict[str, Any]]) -> str:
     """Return the ONNX Runtime provider name from string or option tuple forms."""
 
     return provider if isinstance(provider, str) else provider[0]
+
+
+def _provider_names(providers: Sequence[str | tuple[str, dict[str, Any]]]) -> list[str]:
+    """Return only ONNX Runtime provider names."""
+
+    return [_onnx_provider_name(provider) for provider in providers]
+
+
+def _replace_provider_options(
+    *,
+    providers: Sequence[str | tuple[str, dict[str, Any]]],
+    provider_name: str,
+    provider_options: dict[str, str],
+) -> list[str | tuple[str, dict[str, Any]]]:
+    """Replace one configured provider tuple while preserving provider order."""
+
+    replaced: list[str | tuple[str, dict[str, Any]]] = []
+    found = False
+    for provider in providers:
+        if _onnx_provider_name(provider) == provider_name:
+            replaced.append((provider_name, dict(provider_options)))
+            found = True
+        else:
+            replaced.append(provider)
+    if not found:
+        replaced.insert(0, (provider_name, dict(provider_options)))
+    return replaced
 
 
 class StyleBertVITS2TTSEngine(TTSEngine):
@@ -283,6 +311,25 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             if onnx_plugin_ep is not None and onnx_plugin_ep.strict
             else None
         )
+        onnx_plugin_gguf_cache = (
+            AivmGgufCache(
+                cache_dir=ggml_model_cache_dir,
+                converter_path=ggml_converter_path,
+                converter_device=ggml_converter_device,
+            )
+            if onnx_plugin_ep is not None
+            else None
+        )
+        onnx_plugin_jp_bert_gguf_cache = (
+            JpBertGgufCache(cache_dir=ggml_model_cache_dir)
+            if onnx_plugin_ep is not None
+            else None
+        )
+        if onnx_plugin_ep is not None:
+            self._prepare_onnx_plugin_jp_bert_provider_options(
+                config=onnx_plugin_ep,
+                jp_bert_gguf_cache=onnx_plugin_jp_bert_gguf_cache,
+            )
 
         if tts_backend == "ggml-vulkan":
             self._performance_backend_label = (
@@ -308,7 +355,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
                     converter_path=ggml_converter_path,
                     converter_device=ggml_converter_device,
                 )
-                if ggml_converter_path is not None
+                if ggml_converter_path is not None or ggml_model_path is None
                 else None
             )
             managed_sidecar = (
@@ -356,6 +403,10 @@ class StyleBertVITS2TTSEngine(TTSEngine):
                 aivm_manager=self.aivm_manager,
                 onnx_providers=self.onnx_providers,
                 strict_provider_name=strict_onnx_provider_name,
+                onnx_plugin_ep=onnx_plugin_ep,
+                gguf_cache=onnx_plugin_gguf_cache,
+                jp_bert_gguf_cache=onnx_plugin_jp_bert_gguf_cache,
+                jp_bert_onnx_path_resolver=self._resolve_jp_bert_onnx_path,
             )
             self._backend = FallbackStyleBertVITS2Backend(
                 primary_backend=ggml_backend,
@@ -373,12 +424,20 @@ class StyleBertVITS2TTSEngine(TTSEngine):
                 aivm_manager=self.aivm_manager,
                 onnx_providers=self.onnx_providers,
                 strict_provider_name=strict_onnx_provider_name,
+                onnx_plugin_ep=onnx_plugin_ep,
+                gguf_cache=onnx_plugin_gguf_cache,
+                jp_bert_gguf_cache=onnx_plugin_jp_bert_gguf_cache,
+                jp_bert_onnx_path_resolver=self._resolve_jp_bert_onnx_path,
             )
         else:
             self._backend = OnnxStyleBertVITS2Backend(
                 aivm_manager=self.aivm_manager,
                 onnx_providers=self.onnx_providers,
                 strict_provider_name=strict_onnx_provider_name,
+                onnx_plugin_ep=onnx_plugin_ep,
+                gguf_cache=onnx_plugin_gguf_cache,
+                jp_bert_gguf_cache=onnx_plugin_jp_bert_gguf_cache,
+                jp_bert_onnx_path_resolver=self._resolve_jp_bert_onnx_path,
             )
 
         # Style-Bert-VITS2 本体のロガーを抑制
@@ -445,6 +504,62 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         backend = self._backend
         if isinstance(backend, FallbackStyleBertVITS2Backend):
             backend.close()
+
+    def _prepare_onnx_plugin_jp_bert_provider_options(
+        self,
+        *,
+        config: OnnxPluginExecutionProviderConfig,
+        jp_bert_gguf_cache: JpBertGgufCache | None,
+    ) -> None:
+        """Prepare JP-BERT GGUF before style-bert-vits2 opens the BERT session."""
+
+        if config.provider_name not in _provider_names(self.onnx_providers):
+            return
+        if config.provider_options.get("claim_jp_bert_graph") != "1":
+            return
+        if config.provider_options.get("jp_bert_gguf_path"):
+            return
+        if jp_bert_gguf_cache is None:
+            raise RuntimeError(
+                "ONNX Plugin EP requires a JP-BERT GGUF cache when "
+                "claim_jp_bert_graph=1."
+            )
+
+        jp_bert_onnx_path = self._resolve_jp_bert_onnx_path()
+        jp_bert_gguf_entry = jp_bert_gguf_cache.ensure(onnx_path=jp_bert_onnx_path)
+        config.provider_options["jp_bert_gguf_path"] = str(
+            jp_bert_gguf_entry.gguf_path
+        )
+        self.onnx_providers = _replace_provider_options(
+            providers=self.onnx_providers,
+            provider_name=config.provider_name,
+            provider_options=config.provider_options,
+        )
+
+    def _resolve_jp_bert_onnx_path(self) -> Path:
+        """Resolve the JP-BERT ONNX file and required GGUF metadata files."""
+
+        model_path: Path | None = None
+        for filename in ("model_fp16.onnx", "config.json", "vocab.txt"):
+            resolved_path = hf_hub_download(
+                repo_id=self.BERT_MODEL_REPOSITORY,
+                filename=filename,
+                cache_dir=str(self._bert_model_cache_dir),
+                revision=self.BERT_MODEL_REVISION,
+            )
+            if filename == "model_fp16.onnx":
+                model_path = Path(resolved_path)
+        try:
+            hf_hub_download(
+                repo_id=self.BERT_MODEL_REPOSITORY,
+                filename="tokenizer_config.json",
+                cache_dir=str(self._bert_model_cache_dir),
+                revision=self.BERT_MODEL_REVISION,
+            )
+        except Exception:
+            logger.debug("JP-BERT tokenizer_config.json was not downloaded.")
+        assert model_path is not None
+        return model_path
 
     def _load_bert_model_and_tokenizer(self) -> None:
         """BERT モデルとトークナイザーをロードし、ローカルキャッシュを更新する。"""

@@ -95,6 +95,11 @@ def write_tts_cpp_style_bert_vits2_gguf(
             array = source_arrays.get(source_name)
             if array is None:
                 continue
+            array = prepare_mapped_tensor_array(
+                source_name=source_name,
+                target_name=target_name,
+                array=array,
+            )
             _add_tensor(gguf, writer, target_name, array)
             tensor_count += 1
             written_targets.add(target_name)
@@ -162,6 +167,37 @@ def materialize_weight_norm(
     norm_axes = tuple(axis for axis in range(v.ndim) if axis != dim)
     norm = np.sqrt(np.sum(v * v, axis=norm_axes, keepdims=True))
     return np.ascontiguousarray(v * (g / norm), dtype=np.float32)
+
+
+def prepare_mapped_tensor_array(
+    *,
+    source_name: str,
+    target_name: str,
+    array: Any,
+) -> Any:
+    """Normalize mapped ONNX initializer layout to the TTS.cpp GGUF contract."""
+
+    import numpy as np
+
+    if _requires_matmul_weight_transpose(
+        source_name=source_name,
+        target_name=target_name,
+    ):
+        return np.ascontiguousarray(np.asarray(array, dtype=np.float32).T)
+    return array
+
+
+def _requires_matmul_weight_transpose(*, source_name: str, target_name: str) -> bool:
+    if not source_name.startswith("onnx::MatMul_"):
+        return False
+    if target_name == "style_bert_vits2.text_encoder.style_proj.weight":
+        return True
+    if target_name == "style_bert_vits2.te.enc.spk.w":
+        return True
+    return (
+        target_name.startswith("style_bert_vits2.fl.")
+        and target_name.endswith(".enc.spk.w")
+    )
 
 
 def _weight_norm_targets(mapping_report: TensorMappingReport) -> dict[str, str]:

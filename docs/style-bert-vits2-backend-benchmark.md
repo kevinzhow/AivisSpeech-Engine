@@ -103,7 +103,10 @@ against the native Aivis ggml backend. The Plugin EP uses the normal
 `tts_backend=onnx` engine path, but registers `AivisGgmlExecutionProvider` and
 passes `claim_synthesis_graph=1` plus `claim_jp_bert_graph=1`. Both the
 synthesis ONNX/AIVMX graph and the JP-BERT ONNX graph are executed by TTS.cpp
-through the external EP.
+through the external EP. Synthesis GGUF is prepared from the installed
+AIVM/AIVMX model when no explicit `gguf_path` is supplied; JP-BERT uses the
+prebuilt `kevinzhow/style-bert-vits2-gguf` GGUF bundle rather than reconstructing
+weights from the public JP-BERT ONNX export.
 
 The benchmark harness now unloads Style-Bert-VITS2's process-global ONNX
 JP-BERT session before each backend is constructed. This is required because

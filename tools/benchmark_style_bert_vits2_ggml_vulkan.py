@@ -120,6 +120,7 @@ class _OnnxPluginEpSpec:
     tts_cpp_backend: str
     vulkan_precision: str | None
     tts_cpp_library_path: Path
+    claim_jp_bert_graph: bool = True
 
 
 _BACKEND_TIMING_SUMMARY_FIELDS = (
@@ -187,6 +188,22 @@ def _prepare_models_dir(
     shutil.copyfile(aivm_path, models_dir / f"{model_uuid}.aivm")
     shutil.copyfile(aivmx_path, models_dir / f"{model_uuid}.aivmx")
     return models_dir, model_uuid
+
+
+def _cached_synthesis_gguf_paths(
+    *,
+    cache_dir: Path,
+    model_uuid: str,
+) -> list[Path]:
+    if not cache_dir.exists():
+        return []
+    return sorted(cache_dir.glob(f"{model_uuid}-*.gguf"))
+
+
+def _cached_jp_bert_gguf_paths(*, cache_dir: Path) -> list[Path]:
+    if not cache_dir.exists():
+        return []
+    return sorted(cache_dir.glob("jp-bert-*.gguf"))
 
 
 def _build_aivm_manager(
@@ -1121,12 +1138,6 @@ def _parse_onnx_plugin_ep_specs(args: argparse.Namespace) -> list[_OnnxPluginEpS
             raise ValueError("--onnx_ep_library_path is required for ONNX Plugin EP runs.")
         return []
 
-    if args.jp_bert_gguf_path is None:
-        raise ValueError(
-            "--jp_bert_gguf_path is required for ONNX Plugin EP benchmark runs "
-            "because both synthesis and JP-BERT graphs are claimed."
-        )
-
     tts_cpp_library_path = args.onnx_ep_tts_cpp_library_path
     if tts_cpp_library_path is None:
         tts_cpp_library_path = args.ggml_native_library_path
@@ -1141,6 +1152,8 @@ def _parse_onnx_plugin_ep_specs(args: argparse.Namespace) -> list[_OnnxPluginEpS
     include_precision_suffix = (
         len(vulkan_precision_names) > 1 or vulkan_precision_names[0] != "accurate"
     )
+    claim_jp_bert_graph = True
+    jp_bert_suffix = "-jp-bert"
 
     specs: list[_OnnxPluginEpSpec] = []
     for backend_name in backend_names:
@@ -1153,29 +1166,32 @@ def _parse_onnx_plugin_ep_specs(args: argparse.Namespace) -> list[_OnnxPluginEpS
                     _OnnxPluginEpSpec(
                         name=(
                             "ggml-vulkan"
-                            f"{precision_suffix}-onnx-ep-jp-bert-native"
+                            f"{precision_suffix}-onnx-ep{jp_bert_suffix}-native"
                         ),
                         tts_cpp_backend="vulkan",
                         vulkan_precision=vulkan_precision_name,
                         tts_cpp_library_path=tts_cpp_library_path,
+                        claim_jp_bert_graph=claim_jp_bert_graph,
                     )
                 )
         elif backend_name == "metal":
             specs.append(
                 _OnnxPluginEpSpec(
-                    name="ggml-metal-onnx-ep-jp-bert-native",
+                    name=f"ggml-metal-onnx-ep{jp_bert_suffix}-native",
                     tts_cpp_backend="metal",
                     vulkan_precision=None,
                     tts_cpp_library_path=tts_cpp_library_path,
+                    claim_jp_bert_graph=claim_jp_bert_graph,
                 )
             )
         elif backend_name == "cpu":
             specs.append(
                 _OnnxPluginEpSpec(
-                    name="ggml-cpu-onnx-ep-jp-bert-native",
+                    name=f"ggml-cpu-onnx-ep{jp_bert_suffix}-native",
                     tts_cpp_backend="cpu",
                     vulkan_precision=None,
                     tts_cpp_library_path=tts_cpp_library_path,
+                    claim_jp_bert_graph=claim_jp_bert_graph,
                 )
             )
         else:
@@ -1187,20 +1203,22 @@ def _build_onnx_plugin_ep_config(
     *,
     args: argparse.Namespace,
     spec: _OnnxPluginEpSpec,
+    gguf_path: Path | None = None,
 ) -> OnnxPluginExecutionProviderConfig:
     assert args.onnx_ep_library_path is not None
-    assert args.jp_bert_gguf_path is not None
     provider_options = {
         "backend": spec.tts_cpp_backend,
-        "claim_jp_bert_graph": "1",
+        "claim_jp_bert_graph": "1" if spec.claim_jp_bert_graph else "0",
         "claim_synthesis_graph": "1",
         "eager_load_model": "1",
-        "gguf_path": str(args.gguf_path),
-        "jp_bert_gguf_path": str(args.jp_bert_gguf_path),
         "n_threads": str(args.onnx_ep_n_threads),
         "precision": spec.vulkan_precision or "accurate",
         "tts_cpp_library_path": str(spec.tts_cpp_library_path),
     }
+    if gguf_path is not None:
+        provider_options["gguf_path"] = str(gguf_path)
+    if args.jp_bert_gguf_path is not None:
+        provider_options["jp_bert_gguf_path"] = str(args.jp_bert_gguf_path)
     if spec.tts_cpp_backend != "cpu" and args.tts_device is not None:
         provider_options["device"] = args.tts_device
 
@@ -1263,16 +1281,36 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Benchmark AivisSpeech Style-Bert-VITS2 ONNX CPU vs ggml GPU backends. "
-            "The ggml path uses AIVM/Safetensors plus a preconverted GGUF; "
-            "AIVMX/ONNX is only used for the ONNX baseline."
+            "The ggml path can use a preconverted GGUF or lazily prepare one "
+            "from AIVM/Safetensors or AIVMX/ONNX sources."
         )
     )
     parser.add_argument("--aivm_path", required=True, type=Path)
     parser.add_argument("--aivmx_path", required=True, type=Path)
-    parser.add_argument("--gguf_path", required=True, type=Path)
+    parser.add_argument(
+        "--gguf_path",
+        type=Path,
+        help=(
+            "Optional preconverted synthesis GGUF. If omitted, the benchmark "
+            "uses the Engine GGUF cache path and prepares a GGUF from AIVM/AIVMX."
+        ),
+    )
     parser.add_argument("--jp_bert_gguf_path", type=Path)
     parser.add_argument("--tts_server_path", required=True, type=Path)
     parser.add_argument("--ggml_native_library_path", type=Path)
+    parser.add_argument(
+        "--ggml_model_cache_dir",
+        type=Path,
+        help="GGUF cache directory used when --gguf_path is omitted.",
+    )
+    parser.add_argument(
+        "--ggml_converter_path",
+        type=Path,
+        help=(
+            "Optional TTS.cpp AIVM/Safetensors converter. If omitted, automatic "
+            "synthesis GGUF preparation uses AIVMX/ONNX."
+        ),
+    )
     parser.add_argument("--bert_cache_dir", type=Path)
     parser.add_argument("--output_json", type=Path)
     parser.add_argument(
@@ -1493,6 +1531,8 @@ def main() -> None:
             aivm_path=args.aivm_path,
             aivmx_path=args.aivmx_path,
         )
+        ggml_model_cache_dir = args.ggml_model_cache_dir or tmp_path / "GgufModelCaches"
+        resolved_gguf_path: Path | None = args.gguf_path
         aivm_manager = _build_aivm_manager(tmp_path=tmp_path, models_dir=models_dir)
 
         query_engine = StyleBertVITS2TTSEngine(
@@ -1564,6 +1604,7 @@ def main() -> None:
             onnx_plugin_ep_config = _build_onnx_plugin_ep_config(
                 args=args,
                 spec=onnx_plugin_ep_spec,
+                gguf_path=resolved_gguf_path,
             )
             onnx_plugin_ep_engine = StyleBertVITS2TTSEngine(
                 aivm_manager,
@@ -1571,6 +1612,8 @@ def main() -> None:
                 load_all_models=False,
                 bert_model_cache_dir=args.bert_cache_dir,
                 tts_backend="onnx",
+                ggml_model_cache_dir=ggml_model_cache_dir,
+                ggml_converter_path=args.ggml_converter_path,
                 onnx_plugin_ep=onnx_plugin_ep_config,
             )
             onnx_plugin_ep_engines.append(onnx_plugin_ep_engine)
@@ -1586,7 +1629,10 @@ def main() -> None:
                     f"{onnx_plugin_ep_config.provider_name}, but active ONNX "
                     f"providers are: {actual_providers}"
                 )
-            if onnx_plugin_ep_config.provider_name not in bert_actual_providers:
+            if (
+                onnx_plugin_ep_spec.claim_jp_bert_graph
+                and onnx_plugin_ep_config.provider_name not in bert_actual_providers
+            ):
                 raise RuntimeError(
                     f"{onnx_plugin_ep_spec.name} requires JP-BERT to use "
                     f"{onnx_plugin_ep_config.provider_name}, but active ONNX "
@@ -1617,16 +1663,33 @@ def main() -> None:
             backend_log_path = sidecar_log_path.with_name(
                 f"{sidecar_log_path.stem}-{ggml_backend_spec.name}{sidecar_log_path.suffix}"
             )
-            ggml_model_path = _prepare_tts_cpp_model_path(
-                tmp_path=tmp_path,
-                spec_name=ggml_backend_spec.name,
-                gguf_path=args.gguf_path,
-                jp_bert_gguf_path=(
-                    args.jp_bert_gguf_path
-                    if ggml_backend_spec.use_tts_cpp_jp_bert
-                    else None
-                ),
-            )
+            if (
+                resolved_gguf_path is None
+                and ggml_backend_spec.use_tts_cpp_jp_bert
+                and ggml_backend_spec.transport == "sidecar-http"
+            ):
+                raise ValueError(
+                    "--gguf_path is required for managed sidecar "
+                    "--ggml_frontend tts-cpp-jp-bert runs because synthesis and "
+                    "JP-BERT GGUF files must be loaded from the same TTS.cpp model directory."
+                )
+            ggml_model_path: Path | None = None
+            if resolved_gguf_path is not None:
+                ggml_model_path = _prepare_tts_cpp_model_path(
+                    tmp_path=tmp_path,
+                    spec_name=ggml_backend_spec.name,
+                    gguf_path=resolved_gguf_path,
+                    jp_bert_gguf_path=(
+                        args.jp_bert_gguf_path
+                        if ggml_backend_spec.use_tts_cpp_jp_bert
+                        else None
+                    ),
+                )
+            elif (
+                ggml_backend_spec.use_tts_cpp_jp_bert
+                and args.jp_bert_gguf_path is not None
+            ):
+                ggml_model_path = args.jp_bert_gguf_path.parent
             ggml_jp_bert_model = None
             if ggml_backend_spec.use_tts_cpp_jp_bert:
                 assert args.jp_bert_gguf_path is not None
@@ -1639,9 +1702,14 @@ def main() -> None:
                 load_all_models=False,
                 bert_model_cache_dir=args.bert_cache_dir,
                 tts_backend="ggml-vulkan",
-                ggml_vulkan_model=args.ggml_model_name or args.gguf_path.stem,
+                ggml_vulkan_model=(
+                    args.ggml_model_name
+                    or (resolved_gguf_path.stem if resolved_gguf_path is not None else None)
+                ),
                 ggml_jp_bert_model=ggml_jp_bert_model,
                 ggml_vulkan_strict=True,
+                ggml_model_cache_dir=ggml_model_cache_dir,
+                ggml_converter_path=args.ggml_converter_path,
                 ggml_tts_server_path=args.tts_server_path,
                 ggml_tts_server_backend=ggml_backend_spec.tts_cpp_backend,
                 ggml_model_path=ggml_model_path,
@@ -1720,6 +1788,13 @@ def main() -> None:
             records,
             baseline_backend="onnx-cpu",
         )
+        cached_gguf_paths = _cached_synthesis_gguf_paths(
+            cache_dir=ggml_model_cache_dir,
+            model_uuid=model_uuid,
+        )
+        cached_jp_bert_gguf_paths = _cached_jp_bert_gguf_paths(
+            cache_dir=ggml_model_cache_dir,
+        )
         performance_gates = _evaluate_performance_gates(
             records,
             ggml_vulkan_mean_rtf_at_most=(args.expect_ggml_vulkan_mean_rtf_at_most),
@@ -1739,7 +1814,15 @@ def main() -> None:
                 "model_uuid": model_uuid,
                 "aivm_path": str(args.aivm_path),
                 "aivmx_path": str(args.aivmx_path),
-                "gguf_path": str(args.gguf_path),
+                "gguf_path": str(args.gguf_path) if args.gguf_path is not None else None,
+                "resolved_gguf_path": (
+                    str(resolved_gguf_path) if resolved_gguf_path is not None else None
+                ),
+                "ggml_model_cache_dir": str(ggml_model_cache_dir),
+                "cached_gguf_paths": [str(path) for path in cached_gguf_paths],
+                "cached_jp_bert_gguf_paths": [
+                    str(path) for path in cached_jp_bert_gguf_paths
+                ],
                 "jp_bert_gguf_path": (
                     str(args.jp_bert_gguf_path)
                     if args.jp_bert_gguf_path is not None
@@ -1795,7 +1878,7 @@ def main() -> None:
                             onnx_plugin_ep_spec.vulkan_precision
                         ),
                         "claim_synthesis_graph": True,
-                        "claim_jp_bert_graph": True,
+                        "claim_jp_bert_graph": onnx_plugin_ep_spec.claim_jp_bert_graph,
                     }
                     for onnx_plugin_ep_spec in onnx_plugin_ep_specs
                 ],

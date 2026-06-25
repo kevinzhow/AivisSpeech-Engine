@@ -270,9 +270,9 @@ def test_jp_bert_gguf_writer_exports_tts_cpp_schema_from_onnx(
     source_dir = tmp_path / "jp_bert"
     _write_jp_bert_metadata(source_dir)
     tensor_names = [
-        *_required_hf_tensor_names(layer_count=1),
-        "deberta.embeddings.position_ids",
-        "cls.predictions.bias",
+        *[f"model.{name}" for name in _required_hf_tensor_names(layer_count=1)],
+        "model.deberta.embeddings.position_ids",
+        "model.cls.predictions.bias",
     ]
     onnx_path = source_dir / "model.onnx"
     _write_onnx_initializers(onnx_path, tensor_names)
@@ -387,7 +387,13 @@ def test_compact_deberta_tensor_name_rejects_unknown_tensor(
     )
 
     assert compact_deberta_tensor_name("deberta.embeddings.position_ids") is None
+    assert compact_deberta_tensor_name("model.deberta.embeddings.position_ids") is None
     assert compact_deberta_tensor_name("cls.predictions.bias") is None
+    assert compact_deberta_tensor_name("model.cls.predictions.bias") is None
+    assert (
+        compact_deberta_tensor_name("model.deberta.embeddings.word_embeddings.weight")
+        == "emb.word.weight"
+    )
     with pytest.raises(ValueError, match="Unhandled Style-Bert JP-BERT tensor name"):
         compact_deberta_tensor_name("deberta.encoder.unexpected.weight")
 

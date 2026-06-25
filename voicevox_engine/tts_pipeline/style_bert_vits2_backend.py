@@ -5,7 +5,7 @@ import binascii
 import json
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -28,7 +28,7 @@ from style_bert_vits2.nlp import (
 )
 from style_bert_vits2.tts_model import TTSModel
 
-from voicevox_engine.aivm_gguf_cache import AivmGgufCache
+from voicevox_engine.aivm_gguf_cache import AivmGgufCache, JpBertGgufCache
 from voicevox_engine.aivm_manager import AivmManager
 from voicevox_engine.aivm_metadata import read_aivm_metadata_from_path
 from voicevox_engine.logging import logger
@@ -257,10 +257,18 @@ class OnnxStyleBertVITS2Backend:
         aivm_manager: AivmManager,
         onnx_providers: Sequence[str | tuple[str, dict[str, Any]]],
         strict_provider_name: str | None = None,
+        onnx_plugin_ep: Any | None = None,
+        gguf_cache: AivmGgufCache | None = None,
+        jp_bert_gguf_cache: JpBertGgufCache | None = None,
+        jp_bert_onnx_path_resolver: Callable[[], Path] | None = None,
     ) -> None:
         self._aivm_manager = aivm_manager
         self._onnx_providers = onnx_providers
         self._strict_provider_name = strict_provider_name
+        self._onnx_plugin_ep = onnx_plugin_ep
+        self._gguf_cache = gguf_cache
+        self._jp_bert_gguf_cache = jp_bert_gguf_cache
+        self._jp_bert_onnx_path_resolver = jp_bert_onnx_path_resolver
         self._tts_models: dict[str, TTSModel] = {}
         self._tts_models_lock = threading.Lock()
 
@@ -300,12 +308,16 @@ class OnnxStyleBertVITS2Backend:
 
         assert aivm_metadata.style_vectors is not None
         style_vectors = np.load(BytesIO(aivm_metadata.style_vectors))
+        onnx_providers = self._model_specific_onnx_providers(
+            onnx_source_path=onnx_source_path,
+            aivm_metadata=aivm_metadata,
+        )
 
         tts_model = TTSModel(
             model_path=onnx_source_path,
             config_path=hyper_parameters,
             style_vec_path=style_vectors,
-            onnx_providers=self._onnx_providers,
+            onnx_providers=onnx_providers,
         )
         start_time = time.time()
         logger.info(f"Loading {aivm_info.manifest.name} ({aivm_model_uuid}) ...")
@@ -324,6 +336,83 @@ class OnnxStyleBertVITS2Backend:
         )
 
         return tts_model
+
+    def _model_specific_onnx_providers(
+        self,
+        *,
+        onnx_source_path: Path,
+        aivm_metadata: AivmMetadata,
+    ) -> Sequence[str | tuple[str, dict[str, Any]]]:
+        if self._onnx_plugin_ep is None:
+            return self._onnx_providers
+
+        provider_options = dict(self._onnx_plugin_ep.provider_options)
+        if (
+            provider_options.get("claim_synthesis_graph") == "1"
+            and not provider_options.get("gguf_path")
+        ):
+            if self._gguf_cache is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail="ONNX Plugin EP requires a GGUF cache to prepare synthesis artifacts.",
+                )
+            try:
+                gguf_entry = self._gguf_cache.ensure(
+                    aivm_file_path=onnx_source_path,
+                    aivm_metadata=aivm_metadata,
+                )
+            except Exception as ex:
+                logger.error(
+                    "%s: Failed to prepare ONNX Plugin EP GGUF cache.",
+                    onnx_source_path,
+                    exc_info=ex,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to prepare ONNX Plugin EP GGUF cache.",
+                ) from ex
+            provider_options["gguf_path"] = str(gguf_entry.gguf_path)
+
+        if (
+            provider_options.get("claim_jp_bert_graph") == "1"
+            and not provider_options.get("jp_bert_gguf_path")
+        ):
+            if (
+                self._jp_bert_gguf_cache is None
+                or self._jp_bert_onnx_path_resolver is None
+            ):
+                raise HTTPException(
+                    status_code=500,
+                    detail="ONNX Plugin EP requires a GGUF cache to prepare JP-BERT artifacts.",
+                )
+            try:
+                jp_bert_onnx_path = self._jp_bert_onnx_path_resolver()
+                jp_bert_gguf_entry = self._jp_bert_gguf_cache.ensure(
+                    onnx_path=jp_bert_onnx_path,
+                )
+            except Exception as ex:
+                logger.error(
+                    "Failed to prepare ONNX Plugin EP JP-BERT GGUF cache.",
+                    exc_info=ex,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to prepare ONNX Plugin EP JP-BERT GGUF cache.",
+                ) from ex
+            provider_options["jp_bert_gguf_path"] = str(jp_bert_gguf_entry.gguf_path)
+
+        providers: list[str | tuple[str, dict[str, Any]]] = []
+        plugin_provider_seen = False
+        for provider in self._onnx_providers:
+            provider_name = provider if isinstance(provider, str) else provider[0]
+            if provider_name == self._onnx_plugin_ep.provider_name:
+                providers.append((provider_name, provider_options))
+                plugin_provider_seen = True
+            else:
+                providers.append(provider)
+        if not plugin_provider_seen:
+            providers.insert(0, (self._onnx_plugin_ep.provider_name, provider_options))
+        return providers
 
     def _validate_strict_provider(self, tts_model: TTSModel) -> None:
         """Ensure ONNX Runtime did not silently fall back from a strict Plugin EP."""
@@ -558,7 +647,7 @@ class GgmlVulkanStyleBertVITS2Backend:
 
         gguf_path: Path | None = None
         model_name = self._model_name
-        if self._gguf_cache is not None and container_format == "aivm":
+        if self._should_prepare_gguf_cache(container_format):
             try:
                 gguf_entry = self._gguf_cache.ensure(
                     aivm_file_path=ggml_source_path,
@@ -730,12 +819,35 @@ class GgmlVulkanStyleBertVITS2Backend:
         installed_file_path: Path,
         aivm_model_uuid: str,
     ) -> Path:
-        """Prefer same-UUID AIVM/Safetensors files as ggml conversion sources."""
+        """Prefer the best same-UUID source for ggml conversion."""
 
         aivm_source_path = installed_file_path.with_name(f"{aivm_model_uuid}.aivm")
+        if (
+            aivm_source_path.exists()
+            and aivm_source_path.is_file()
+            and (
+                self._gguf_cache is None
+                or self._gguf_cache.converter_path is not None
+            )
+        ):
+            return aivm_source_path
+        aivmx_source_path = installed_file_path.with_name(f"{aivm_model_uuid}.aivmx")
+        if (
+            self._gguf_cache is not None
+            and aivmx_source_path.exists()
+            and aivmx_source_path.is_file()
+        ):
+            return aivmx_source_path
         if aivm_source_path.exists() and aivm_source_path.is_file():
             return aivm_source_path
         return installed_file_path
+
+    def _should_prepare_gguf_cache(self, container_format: str) -> bool:
+        if self._gguf_cache is None:
+            return False
+        if container_format == "aivmx":
+            return True
+        return container_format == "aivm" and self._gguf_cache.converter_path is not None
 
     def _validate_sidecar_model(self, model: GgmlStyleBertVITS2Model) -> None:
         """Verify that the sidecar is reachable and has the requested model."""

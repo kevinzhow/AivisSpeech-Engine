@@ -33,6 +33,9 @@ class JpBertGgufWriteResult:
 def compact_deberta_tensor_name(name: str) -> str | None:
     """Map Hugging Face DeBERTa tensor names to TTS.cpp JP-BERT GGUF names."""
 
+    if name.startswith("model."):
+        name = name.removeprefix("model.")
+
     if name == "deberta.embeddings.position_ids":
         return None
     if name.startswith("cls.predictions."):

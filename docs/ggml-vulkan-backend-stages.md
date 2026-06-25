@@ -10,7 +10,7 @@
 
 因此，ggml/Vulkan 的执行逻辑不应作为 AivisSpeech Engine 内部的 ONNX Runtime provider 补丁接入。当前已验证路线仍是并行的显式 opt-in native 推理后端：保留现有 ONNX 路径为默认稳定路径，把 Vulkan 做成显式 opt-in，并且每个阶段都有可回滚边界。
 
-如果后续要尝试 ONNX Runtime Plugin EP 路线，也必须保持完全外置：AivisSpeech Engine 只做通用 Plugin EP shared library 注册和 provider 顺序选择，不承载 ggml 图匹配、TTS.cpp runner、GGUF cache、Vulkan device routing、JP-BERT ONNX 替换或 synthesis 执行逻辑。该路线的边界与阶段记录在 [GGML ONNX Runtime Plugin Provider](./ggml-onnx-plugin-provider.md)。
+ONNX Runtime Plugin EP 路线也必须保持外置：AivisSpeech Engine 只做通用 Plugin EP shared library 注册、provider 顺序选择，以及调用方无感的 GGUF cache 准备；ggml 图匹配、TTS.cpp runner、Vulkan/Metal device routing、JP-BERT graph claim 和 synthesis 执行逻辑仍然在外部 EP / TTS.cpp 中。JP-BERT GGUF 使用已发布的预转换 bundle，不从公开 JP-BERT ONNX 现场反推。该路线的边界与阶段记录在 [GGML ONNX Runtime Plugin Provider](./ggml-onnx-plugin-provider.md)。
 
 For ggml/TTS.cpp, AIVM/Safetensors is the preferred source format. Safetensors preserves the original named weight tensors more directly, which matches TTS.cpp's GGUF conversion model. AIVMX/ONNX remains the compatibility format for the existing ONNX backend and for parity baselines, but automatic GGUF conversion should not depend on ONNX graph/export names.
 
@@ -451,11 +451,13 @@ uv run pytest test/integration/test_onnxruntime_ep_aivis_ggml.py -q
 ```
 
 When enabled, the EPContext fixture compiles synthesis and optional JP-BERT
-ONNX graphs into both external-payload and embedded-payload EPContext models,
+graph claims into both external-payload and embedded-payload EPContext models,
 validates the generated Aivis GGML payloads, and loads the precompiled models
-without passing `gguf_path` or `jp_bert_gguf_path`. That proves ORT
-`ModelCompiler` compatibility and payload-driven lazy restore, while keeping the
-deployment-specific `tts_cpp_library_path` outside the portable payload.
+without passing `gguf_path` or `jp_bert_gguf_path`. Synthesis GGUF is prepared
+from AIVM/AIVMX inputs; JP-BERT GGUF is resolved from the prebuilt bundle cache.
+That proves ORT `ModelCompiler` compatibility and payload-driven lazy restore,
+while keeping the deployment-specific `tts_cpp_library_path` outside the
+portable payload.
 - The ONNX Runtime Plugin EP route now also exposes a versioned offline
   synthesis compiler command:
 
