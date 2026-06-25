@@ -432,8 +432,8 @@ def test_package_artifact_bundle_cli_outputs_portable_sha_report(
     assert str(tmp_path) not in json.dumps(report, sort_keys=True)
 
 
-def test_scheduled_workflow_requires_pinned_real_artifact_bundle() -> None:
-    """The weekly real-artifact matrix must fail closed without pinned inputs."""
+def test_workflow_keeps_real_artifact_bundle_manual_and_optional() -> None:
+    """Real artifacts are a manual CI path, not a scheduled production gate."""
 
     workflow_path = (
         Path(__file__).parents[2]
@@ -443,17 +443,12 @@ def test_scheduled_workflow_requires_pinned_real_artifact_bundle() -> None:
     )
     workflow = workflow_path.read_text(encoding="utf-8")
 
-    assert "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL" in workflow
-    assert "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256" in workflow
-    assert (
-        "Scheduled real-artifact validation requires "
-        "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL"
-    ) in workflow
-    assert (
-        "Scheduled real-artifact validation requires "
-        "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256"
-    ) in workflow
-    assert 'if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then' in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "artifact_bundle_url:" in workflow
+    assert "has_bundle=false" in workflow
+    assert "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL" not in workflow
+    assert "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256" not in workflow
+    assert "schedule:" not in workflow
 
 
 def _file_sha256(path: Path) -> str:

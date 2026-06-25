@@ -98,7 +98,7 @@ This directory currently provides:
 - A strict GGUF writer entry point for ready converter plans. It writes
   `model.gguf` only after tensor mapping, external sources, and initializer
   counts are complete.
-- A cache manifest validator for deployment gates. It checks manifest version,
+- A cache manifest validator for prepared GGUF artifacts. It checks manifest version,
   signature/runtime contracts, EPContext-lite metadata, readiness status when
   requested, and portable relative artifact paths.
 - An official ORT EPContext payload validator. It checks the generated JSON
@@ -124,12 +124,6 @@ This directory currently provides:
   library/backend/device/thread/model tuple reuse one loaded TTS.cpp runtime
   instead of reloading the same synthesis and JP-BERT GGUF artifacts for every
   ONNX session.
-- A real-artifact bundle manifest writer. It generates
-  `aivis_ggml_ep_bundle.json` from the fixed hosted-bundle layout and validates
-  the result before scheduled CI consumes the bundle.
-- A deterministic real-artifact bundle packager. It writes the manifest when
-  needed, emits a `.tar.gz` archive with stable file metadata, and reports the
-  SHA-256 value used by the scheduled workflow secret.
 
 The native EP reports `AivisGgmlExecutionProvider` to ONNX Runtime through the
 Plugin EP ABI. `GetCapability()` inspects ORT graphs for the known Aivis
@@ -228,42 +222,14 @@ manifests.
    `validate_ep_context_payload.py`. `Compile()` returns both the ORT-required
    `OrtNodeComputeInfo` and a fused-node-name-matched `EPContext` node, which is
    required by ORT `ModelCompiler` in ONNX Runtime 1.26.
-5. Offline compiler lifecycle: partially implemented. The cache manifest
-   validator now provides a deployment gate for manifest/runtime/signature and
-   portable artifact layout compatibility, and rejects compatibility-matrix
-   drift across provider version, ORT Plugin EP API version, TTS.cpp ABI/GGUF
-   schema, synthesis/JP-BERT signature contracts, official EPContext payload
-   version, compiled-model compatibility policy, backend, and precision. The
-   EPContext payload validator gates generated ORT context artifacts. Opt-in
-   integration tests now compile
-   real synthesis and JP-BERT graphs into external and embedded EPContext
-   models, then load those precompiled models through payload-driven lazy
-   restore. A second opt-in fixture writes a real synthesis GGUF with
-   `prepare_cache --write-gguf`, and the `compile-cache` command wraps that
-   path as the versioned offline compiler entry point with strict tensor
-   mapping, GGUF writing, ready-manifest validation, and compiled-model
-   compatibility metadata output. The manifest also records an explicit
-   compatibility matrix covering ORT Plugin EP API version, TTS.cpp C API
-   contract, GGUF schema expectation, model signature contracts, EPContext
-   support level, EPContext payload version, and the compiled-model
-   compatibility contract used by ORT model package selection. The native EP
-   also implements ORT's compiled-model compatibility callbacks: exact
-   provider/runtime/signature/GGUF contract matches return optimal, ORT API
-   version drift returns prefer-recompile, unrelated EP metadata is
-   not-applicable, and Aivis contract drift is unsupported. The dedicated
-   GitHub Actions workflow covers public Plugin EP checks and can run the
-   real-artifact compiler/EPContext matrix on manual dispatch or the weekly
-   scheduled path when a pinned artifact bundle secret is configured. The
-   package now also owns the JP-BERT GGUF writer for TTS.cpp's
-   Style-Bert-VITS2 JP-BERT schema, so JP-BERT can be generated from the ONNX
-   export plus adjacent `config.json`/tokenizer files, or from a Hugging Face
-   JP-BERT directory. The bundle manifest writer and deterministic bundle
-   packager generate the versioned `aivis_ggml_ep_bundle.json`, `.tar.gz`, and
-   SHA-256 used by scheduled CI before the validator gates it. A real-artifact
-   JP-BERT parity fixture compares Plugin EP `[tokens, 1024]` features against
-   ONNX CPU. Remaining work is expanding the hosted matrix across more
-   ORT/TTS.cpp/GGUF schema versions and configuring the production artifact
-   bundle secrets.
+5. Offline compiler lifecycle: scoped to local import and inference. The
+   `compile-cache` command prepares the synthesis GGUF path with strict tensor
+   mapping and ready-manifest validation. The JP-BERT GGUF writer supports
+   ONNX initializers and Hugging Face checkpoint directories. Opt-in
+   integration fixtures compare JP-BERT Plugin EP output against ONNX CPU and
+   can compile/load EPContext models for local validation. Hosted artifact
+   bundles and scheduled production matrices are not part of the current
+   minimum path.
 
 ## Native Build
 
@@ -448,45 +414,9 @@ python tools/validate_ep_context_payload.py /path/to/context/model_aivis_ggml_sy
 aivis-ggml-onnx-ep-validate-ep-context /path/to/context/model_aivis_ggml_synthesis_0.json --graph-kind synthesis
 ```
 
-Validate a hosted real-artifact bundle before running the matrix:
-
-```bash
-python tools/validate_artifact_bundle.py /path/to/bundle/root --require-manifest
-# or, after installing the package:
-aivis-ggml-onnx-ep-validate-artifact-bundle /path/to/bundle/root --require-manifest
-```
-
-Write the canonical bundle manifest before publishing a real-artifact bundle:
-
-```bash
-python tools/write_artifact_bundle_manifest.py /path/to/bundle/root --overwrite
-# or, after installing the package:
-aivis-ggml-onnx-ep-write-artifact-bundle-manifest /path/to/bundle/root --overwrite
-```
-
-The writer records the current provider/ORT/TTS.cpp/GGUF compatibility contract,
-derives the canonical `matrix_id` from that contract, adds optional JP-BERT
-artifacts only when their files are present, and then runs the same bundle
-validator. Its JSON report uses portable relative paths only. Custom
-`matrix_id` values are rejected; use archive names or release metadata for
-nightly labels, not the compatibility contract.
-
-Package a validated bundle for upload and record the SHA-256 for CI:
-
-```bash
-python tools/package_artifact_bundle.py /path/to/bundle/root \
-  --output /path/to/aivis-ggml-onnx-ep-artifacts.tgz
-# or, after installing the package:
-aivis-ggml-onnx-ep-package-artifact-bundle /path/to/bundle/root \
-  --output /path/to/aivis-ggml-onnx-ep-artifacts.tgz
-```
-
-The package command creates `aivis_ggml_ep_bundle.json` when it is missing,
-validates the bundle, writes a deterministic `tar.gz`, and prints a portable
-JSON report containing the archive filename, byte size, included relative
-paths, and SHA-256. Upload that archive to stable storage, set
-`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL` to the uploaded URL, and set
-`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` to the reported SHA-256.
+The artifact-bundle helper commands are optional release/debug tooling. They
+are not required for importing an Aivis model locally or running GGML ONNX
+inference through the Plugin EP.
 
 Run the opt-in real-artifact EPContext round-trip fixture:
 
@@ -546,84 +476,8 @@ probe (`1,5,6,2`), `max_abs_diff <= 0.05`, `rmse <= 0.005`, and
 `AIVIS_GGML_ONNX_EP_JP_BERT_MIN_SNR_DB`.
 
 The hosted workflow `.github/workflows/test-onnxruntime-ggml-ep.yml` runs the
-public Plugin EP checks on push and pull request. On manual dispatch or the
-weekly scheduled run, it can also run the real-artifact compiler and EPContext
-matrix when given a bundle URL via the `artifact_bundle_url` input or the
-`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL` secret. The bundle must unpack to this
-portable layout:
-
-```text
-aivis_ggml_ep_bundle.json       # required for scheduled validation
-lib/libtts.so
-synthesis/model.aivmx
-synthesis/model.gguf
-synthesis/config.json
-synthesis/style_vectors.npy
-jp_bert/model.onnx              # optional JP-BERT graph for EPContext tests
-jp_bert/model.gguf              # optional; generated when missing and model.onnx exists
-jp_bert/config.json             # required when model.gguf must be generated
-jp_bert/vocab.txt               # required when model.gguf must be generated
-jp_bert/tokenizer_config.json   # required when model.gguf must be generated
-```
-
-The optional manifest is required on scheduled runs and may be omitted for
-manual legacy bundles. Prefer generating it with
-`aivis-ggml-onnx-ep-write-artifact-bundle-manifest` instead of hand-editing
-JSON. It records the real-artifact matrix and per-artifact content digests
-without local paths. Abbreviated example:
-
-```json
-{
-  "artifact_digests": {
-    "lib_tts": {
-      "path": "lib/libtts.so",
-      "sha256": "<64 lowercase hex characters>",
-      "size_bytes": 123456
-    }
-  },
-  "artifacts": {
-    "lib_tts": "lib/libtts.so",
-    "synthesis_config": "synthesis/config.json",
-    "synthesis_gguf": "synthesis/model.gguf",
-    "synthesis_onnx": "synthesis/model.aivmx",
-    "synthesis_style_vectors": "synthesis/style_vectors.npy"
-  },
-  "compatibility_matrix": {
-    "version": "aivis-ggml-compatibility-matrix-v1"
-  },
-  "matrix_id": "ort-1.26.0-epapi26-provider0.1.0-tts-abi1-gguf1",
-  "onnxruntime": {
-    "plugin_ep_api_version": 26,
-    "tested_runtime_version": "1.26.0"
-  },
-  "provider": {
-    "name": "AivisGgmlExecutionProvider",
-    "version": "0.1.0"
-  },
-  "tts_cpp": {
-    "gguf_schema_version": 1,
-    "runtime_abi_version": 1
-  },
-  "version": "aivis-ggml-real-artifact-bundle-v1"
-}
-```
-
-The validator checks the canonical matrix id, full compatibility matrix, every
-listed artifact path, file presence, byte size, and SHA-256. If an optional
-artifact is listed in the manifest, the file must be present and must match its
-digest.
-
-The workflow builds the native Plugin EP against ONNX Runtime 1.26 headers,
-smoke-registers it, validates the real-artifact bundle, runs `compile_cache.py`
-with the synthesis files, generates `jp_bert/model.gguf` with
-`compile_jp_bert.py` when `jp_bert/model.onnx` is present and the GGUF is
-missing, runs the JP-BERT writer fixture when `jp_bert/model.onnx` is present,
-runs the JP-BERT ONNX CPU parity fixture when both JP-BERT ONNX and GGUF
-artifacts are present, and runs the EPContext round-trip fixture. The optional
-`artifact_bundle_sha256` input or
-`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` secret pins the downloaded bundle.
-Manual dispatch may omit the bundle to run only public checks. The weekly
-scheduled run fails closed unless both
-`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL` and
-`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` are configured, so the production
-matrix cannot silently degrade into a no-artifact smoke run.
+public Plugin EP checks on push and pull request. Manual dispatch may provide
+an `artifact_bundle_url` only when someone explicitly wants to exercise
+real-artifact compiler, JP-BERT parity, or EPContext fixtures in CI. There is
+no scheduled bundle gate and no required bundle secret for the current local
+import-and-inference scope.

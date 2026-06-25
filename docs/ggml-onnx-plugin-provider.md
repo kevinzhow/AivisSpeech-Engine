@@ -202,145 +202,21 @@ Compile rules:
 - Short, medium, and long synthesis outputs are compared against ONNX CPU for
   sample count, max absolute difference, RMSE, SNR, and RTF.
 
-## Production Hardening Stages
+## Current Scope
 
-These stages continue from the first implementation route above. They are
-intended to make the Plugin EP production-safe without moving TTS.cpp-specific
-logic back into AivisSpeech Engine.
+The current target is the local import-and-run path:
 
-1. Runtime registry and ABI gate.
-   - Status: implemented in the native Plugin EP.
-   - Identical `tts_cpp_library_path`, backend, device, precision, thread
-     count, `gguf_path`, and `jp_bert_gguf_path` combinations share a
-     process-local TTS.cpp runtime through a weak registry.
-   - Fused compute info holds a shared runtime reference, so the runtime stays
-     alive until ORT releases the compiled compute path.
-   - Required TTS.cpp C API symbols are resolved before graph claim. Optional
-     TTS.cpp runtime ABI and GGUF schema version symbols are enforced when a
-     newer TTS.cpp build exports them.
+- Convert or prepare the Aivis synthesis model and JP-BERT model as TTS.cpp
+  compatible GGUF artifacts.
+- Register `AivisGgmlExecutionProvider` through the generic Aivis ONNX Plugin
+  EP options.
+- Load `libtts.so`, `gguf_path`, and `jp_bert_gguf_path` explicitly through
+  provider options.
+- Claim only the supported synthesis and JP-BERT graphs.
+- Compare JP-BERT features and synthesis audio against ONNX CPU before treating
+  the GGML path as usable.
 
-2. Signature contract.
-   - Status: implemented in cache tooling and the signature inspector.
-   - The Python inspector emits `aivis-ggml-signature-contract-v1`, a stable
-     structural hash, synthesis match status, and JP-BERT match status.
-   - The cache key includes the structural signature hash in addition to source
-     hash, op-sequence hash, initializer-name hash, and converter version.
-   - Native `GetCapability()` still mirrors structural checks from the ORT graph
-     API because ORT may expose optimized fused graphs instead of the raw ONNX
-     file hash.
-
-3. EPContext-lite manifest.
-   - Status: implemented as portable manifest metadata.
-   - `manifest.json` records `aivis-ggml-ep-context-lite-v1`, provider name,
-     provider options, cache key, and relative artifact names. It does not
-     store local absolute paths.
-   - This is a deployment and cache contract only. It is intentionally marked as
-     `official_ort_ep_context.enabled=false` until the native EP creates real
-     ORT EPContext nodes.
-
-4. Official ONNX Runtime EPContext.
-   - Status: generation implemented, lazy artifact restore inference
-     implemented.
-   - Native `Compile()` honors ORT's `ep.context_enable` flow for supported
-     synthesis and JP-BERT graphs by returning `com.microsoft::EPContext` nodes
-     instead of `OrtNodeComputeInfo`.
-   - `ep.context_embed_mode=1` embeds an Aivis GGML JSON context payload in
-     `ep_cache_context`. `ep.context_embed_mode=0` writes that payload beside
-     `ep.context_file_path` and stores only a relative file name.
-   - Context payload artifact paths must stay relative to the generated context
-     model directory. If `cache_manifest_path`, `gguf_path`, or
-     `jp_bert_gguf_path` are outside that directory tree, context generation
-     fails instead of storing absolute local paths.
-   - Loading and executing precompiled EPContext models works when the
-     application passes the deployment-specific `tts_cpp_library_path` and the
-     relevant claim flag. The provider claims `source=AivisGgmlExecutionProvider`
-     EPContext nodes, restores relative `cache_manifest_path`, `gguf_path`, and
-     `jp_bert_gguf_path` values from the payload, lazy-loads TTS.cpp, and routes
-     compute through the existing synthesis/JP-BERT bridge.
-   - The context payload intentionally does not store `tts_cpp_library_path`
-     because shared library paths are deployment-specific.
-   - `validate_ep_context_payload.py` can validate the generated payload before
-     deployment: version/provider/runtime contracts, graph kind, backend
-     options, portable artifact paths, and absence of deployment-specific TTS.cpp
-     library paths.
-   - ORT 1.26 `ModelCompiler` still requires `Compile()` to return a valid
-     `OrtNodeComputeInfo` for each graph even when EPContext generation is
-     enabled. The generated EPContext node must also use the exact fused node
-     name supplied by ORT; ORT replaces fused nodes by name when building the
-     compiled model.
-
-5. Offline compiler lifecycle and compatibility matrix.
-   - Status: partially implemented.
-   - A cache manifest validator now checks manifest version,
-     signature/runtime contracts, EPContext-lite metadata, optional ready
-     status, the complete compatibility matrix, provider backend/precision,
-     and portable relative artifact paths before deployment.
-   - An official EPContext payload validator now gates generated ORT context
-     artifacts separately from cache manifests.
-   - Opt-in real-artifact fixtures now cover ORT `ModelCompiler` EPContext
-     round trips for synthesis and JP-BERT graphs, in both external payload and
-     embedded payload modes. The precompiled models are loaded without passing
-     `gguf_path` or `jp_bert_gguf_path`, proving payload-driven lazy restore.
-   - A second opt-in fixture covers strict synthesis ONNX-to-GGUF writing with
-     `prepare_cache --write-gguf` and validates the resulting ready manifest.
-   - Every cache manifest records an explicit compatibility matrix: provider
-     version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API
-     contract, GGUF schema expectation, synthesis/JP-BERT signature contracts,
-     EPContext support level, EPContext payload version, and compiled-model
-     compatibility contract. The validator rejects drift in those fields rather
-     than treating the matrix as informational metadata.
-   - The native Plugin EP now implements ORT compiled-model compatibility:
-     `GetCompiledModelCompatibilityInfo()` emits the provider/runtime/signature
-     contract as portable JSON for `ep_compatibility_info`, and
-     `ValidateCompiledModelCompatibilityInfo()` scores that metadata as
-     optimal, prefer-recompile, unsupported, or not-applicable.
-   - `aivis-ggml-onnx-ep-compile-cache` is the versioned offline compiler
-     entry point for synthesis artifacts. It wraps tensor-pack extraction,
-     strict initializer mapping, GGUF writing, ready-manifest validation, and
-     `ep_compatibility_info` generation for ORT model-package metadata.
-   - `aivis-ggml-onnx-ep-compile-jp-bert` is the versioned offline compiler
-     entry point for JP-BERT artifacts. It writes TTS.cpp-compatible JP-BERT
-     GGUF from ONNX initializers or a Hugging Face checkpoint directory and
-     emits `compiled_model_compatibility_info` with `graph_kind=jp-bert` for
-     ORT model-package metadata.
-   - `aivis-ggml-onnx-ep-validate-artifact-bundle` validates the hosted
-     real-artifact bundle before the matrix runs. Scheduled runs require
-     `aivis_ggml_ep_bundle.json`, which records provider version, ORT runtime
-     version/API, TTS.cpp runtime ABI, GGUF schema version, matrix id, and
-     the full compatibility matrix, plus portable artifact paths and
-     per-artifact size/SHA-256 digests. The matrix id is derived from the
-     current provider contract and must match that contract during validation.
-   - `aivis-ggml-onnx-ep-write-artifact-bundle-manifest` generates that bundle
-     manifest from the fixed artifact layout, records the current compatibility
-     contract, rejects custom matrix ids, includes optional JP-BERT files only
-     when present, and validates the result before publishing.
-   - `aivis-ggml-onnx-ep-package-artifact-bundle` creates the deterministic
-     hosted `tar.gz` and reports the SHA-256 used by the scheduled workflow
-     secret, so artifact publishing no longer depends on ad hoc local tar
-     commands.
-   - Hosted CI now has a dedicated `Test ONNX Runtime GGML EP` workflow. Push
-     and pull request runs cover Python checks, default Plugin EP integration
-     tests, native build, and native smoke registration. Manual dispatch and
-     weekly scheduled runs can download a real-artifact bundle, run the
-     artifact-bundle validator, run the synthesis compiler, generate the
-     JP-BERT GGUF from `jp_bert/model.onnx` when the bundle does not already
-     include `jp_bert/model.gguf`, run the JP-BERT writer fixture, compare
-     JP-BERT Plugin EP feature output against ONNX CPU, and run the EPContext
-     round-trip matrix. Scheduled runs fail closed unless the pinned bundle URL
-     and SHA secrets are configured, so the production matrix cannot silently
-     skip real artifacts.
-   - The package now owns a TTS.cpp-compatible Style-Bert-VITS2 JP-BERT GGUF
-     writer. It maps Hugging Face DeBERTa tensor names into TTS.cpp's compact
-     JP-BERT tensor schema, writes the tokenizer/config metadata consumed by
-     TTS.cpp, and fails before writing if any tensor that TTS.cpp will load is
-     missing. It supports JP-BERT ONNX initializers and Hugging Face checkpoint
-     directories (`model.safetensors` or `pytorch_model.bin`).
-   - Remaining production work: upload the generated artifact bundle to stable
-     storage, configure the pinned production artifact bundle URL/SHA secrets
-     in the repository environment, and add additional artifact bundle manifests
-     for more ORT/TTS.cpp/GGUF schema versions.
-   - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
-     TTS.cpp C API version, GGUF schema version, synthesis signature contract,
-     and JP-BERT signature contract.
-   - Keep unknown exports and incomplete mappings as hard failures before graph
-     claim. Do not silently fall back to partial GGUF generation.
+Artifact bundle packaging, hosted bundle manifests, scheduled real-artifact
+matrices, and production storage secrets are optional release tooling. They are
+not required for local Aivis model import, GGML ONNX inference, benchmark
+reproduction, or accuracy validation.

@@ -24,13 +24,11 @@ on:
   workflow_dispatch:
     inputs:
       artifact_bundle_url:
-        description: "Optional .tar.gz/.tgz/.zip bundle for real-artifact EPContext and compiler tests."
+        description: "Optional manual .tar.gz/.tgz/.zip bundle for real-artifact EPContext and compiler tests."
         required: false
       artifact_bundle_sha256:
         description: "Optional SHA-256 for artifact_bundle_url."
         required: false
-  schedule:
-    - cron: "17 3 * * 1"
 
 defaults:
   run:
@@ -106,26 +104,16 @@ jobs:
 
       - name: <Setup> Resolve real-artifact bundle input
         id: real-artifacts
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+        if: github.event_name == 'workflow_dispatch'
         env:
           INPUT_ARTIFACT_BUNDLE_URL: ${{ inputs.artifact_bundle_url }}
           INPUT_ARTIFACT_BUNDLE_SHA256: ${{ inputs.artifact_bundle_sha256 }}
-          SECRET_ARTIFACT_BUNDLE_URL: ${{ secrets.AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL }}
-          SECRET_ARTIFACT_BUNDLE_SHA256: ${{ secrets.AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256 }}
         run: |
-          bundle_url="${INPUT_ARTIFACT_BUNDLE_URL:-$SECRET_ARTIFACT_BUNDLE_URL}"
-          bundle_sha256="${INPUT_ARTIFACT_BUNDLE_SHA256:-$SECRET_ARTIFACT_BUNDLE_SHA256}"
+          bundle_url="${INPUT_ARTIFACT_BUNDLE_URL}"
+          bundle_sha256="${INPUT_ARTIFACT_BUNDLE_SHA256}"
           if [[ -z "$bundle_url" ]]; then
-            if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-              echo "::error::Scheduled real-artifact validation requires AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL."
-              exit 1
-            fi
             echo "has_bundle=false" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
-          if [[ -z "$bundle_sha256" && "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-            echo "::error::Scheduled real-artifact validation requires AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256."
-            exit 1
           fi
           {
             echo "ARTIFACT_BUNDLE_URL=${bundle_url}"
@@ -148,13 +136,9 @@ jobs:
             tar -xf build/real-artifacts/bundle -C build/real-artifacts
           fi
           find build/real-artifacts -maxdepth 3 -type f | sort
-          validate_args=(build/real-artifacts)
-          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-            validate_args+=(--require-manifest)
-          fi
           PYTHONPATH=experimental/onnxruntime-ep-aivis-ggml/src \
           uv run python experimental/onnxruntime-ep-aivis-ggml/tools/validate_artifact_bundle.py \
-            "${validate_args[@]}"
+            build/real-artifacts
 
       - name: <Test> Run real-artifact compiler and EPContext matrix
         if: steps.real-artifacts.outputs.has_bundle == 'true'
