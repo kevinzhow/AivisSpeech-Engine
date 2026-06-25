@@ -134,6 +134,9 @@ def test_prepare_ggml_cache_writes_portable_manifest(
         "requires_model_editor_api": True,
         "tested_runtime_version": "1.26.0",
     }
+    assert plan.manifest["compatibility_matrix"]["ep_context"][
+        "official_node_inference"
+    ] == "lazy_artifact_restore_tts_library_required"
     assert (
         "tts_style_bert_vits2_synthesize_front_with_style_vec"
         in plan.manifest["runtime_contract"]["required_tts_cpp_symbols"]

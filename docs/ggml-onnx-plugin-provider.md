@@ -237,7 +237,7 @@ logic back into AivisSpeech Engine.
      ORT EPContext nodes.
 
 4. Official ONNX Runtime EPContext.
-   - Status: generation implemented, provider-option-based inference
+   - Status: generation implemented, lazy artifact restore inference
      implemented.
    - Native `Compile()` honors ORT's `ep.context_enable` flow for supported
      synthesis and JP-BERT graphs by returning `com.microsoft::EPContext` nodes
@@ -250,13 +250,13 @@ logic back into AivisSpeech Engine.
      `jp_bert_gguf_path` are outside that directory tree, context generation
      fails instead of storing absolute local paths.
    - Loading and executing precompiled EPContext models works when the
-     application still passes the matching TTS.cpp provider options and claim
-     flags. The provider claims `source=AivisGgmlExecutionProvider` EPContext
-     nodes and routes them through the existing synthesis/JP-BERT compute
-     bridge.
-   - The remaining production step is payload-driven lazy runtime restore, so a
-     context model can recover relative artifact paths without requiring the
-     same `gguf_path` and `jp_bert_gguf_path` provider options again.
+     application passes the deployment-specific `tts_cpp_library_path` and the
+     relevant claim flag. The provider claims `source=AivisGgmlExecutionProvider`
+     EPContext nodes, restores relative `cache_manifest_path`, `gguf_path`, and
+     `jp_bert_gguf_path` values from the payload, lazy-loads TTS.cpp, and routes
+     compute through the existing synthesis/JP-BERT bridge.
+   - The context payload intentionally does not store `tts_cpp_library_path`
+     because shared library paths are deployment-specific.
 
 5. Offline compiler lifecycle and compatibility matrix.
    - Status: partially implemented.

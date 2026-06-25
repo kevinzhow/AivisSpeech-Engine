@@ -68,12 +68,13 @@ payload. `ep.context_embed_mode=1` embeds that payload into the
 file next to `ep.context_file_path` and records only the relative file name in
 `ep_cache_context`.
 
-Loading a precompiled EPContext model is supported when the application still
-passes the same TTS.cpp provider options (`tts_cpp_library_path`, `gguf_path`,
-`jp_bert_gguf_path`, `eager_load_model=1`, and the relevant `claim_*_graph=1`).
-The remaining production work is context-payload-driven lazy runtime restore,
-where the provider can recover artifact paths from the EPContext payload instead
-of requiring the same provider options again.
+Loading a precompiled EPContext model is supported with payload-driven lazy
+runtime restore. The application still passes the deployment-specific
+`tts_cpp_library_path` and the relevant `claim_*_graph=1` flag, but `gguf_path`,
+`jp_bert_gguf_path`, and `cache_manifest_path` can be recovered from the
+relative paths stored in the EPContext payload. The portable payload does not
+store `tts_cpp_library_path` because shared library locations are deployment
+specific.
 
 ## Current Status
 
@@ -199,14 +200,14 @@ manifests.
    `aivis-ggml-ep-context-lite-v1`, relative artifact names, provider options,
    and cache key without storing absolute local paths. This is not yet the
    official ONNX Runtime `EPContext` node path.
-4. Official ORT EPContext: generation implemented, provider-option-based
+4. Official ORT EPContext: generation implemented, lazy artifact restore
    inference implemented. The native EP honors `ep.context_enable` by returning
    real EPContext nodes from `Compile()` and writing/embedding a portable JSON
    payload. When a precompiled EPContext model is loaded, the provider claims
-   `source=AivisGgmlExecutionProvider` nodes and routes them through the same
-   synthesis/JP-BERT compute bridge if the matching TTS.cpp runtime options are
-   provided. The remaining work is lazy runtime restore directly from the
-   EPContext payload.
+   `source=AivisGgmlExecutionProvider` nodes, restores relative GGUF/cache
+   artifact paths from the payload, lazy-loads TTS.cpp through the provided
+   `tts_cpp_library_path`, and routes compute through the same synthesis/JP-BERT
+   bridge.
 5. Offline compiler lifecycle: partially implemented. The cache manifest
    validator now provides a deployment gate for manifest/runtime/signature and
    portable artifact layout compatibility. The manifest also records an

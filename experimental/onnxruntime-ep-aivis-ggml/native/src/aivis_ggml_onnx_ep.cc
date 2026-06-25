@@ -470,29 +470,34 @@ OrtStatus* ValidateEpConfig(const OrtApi& api, const AivisGgmlEpConfig& config) 
             "AivisGgmlExecutionProvider option jp_bert_gguf_path does not exist.");
       }
     }
-    if (config.claim_synthesis_graph && !config.eager_load_model) {
+    if ((config.claim_synthesis_graph || config.claim_jp_bert_graph) &&
+        !config.eager_load_model &&
+        config.tts_cpp_library_path.empty()) {
       return CreateStatus(
           api,
           ORT_INVALID_ARGUMENT,
-          "AivisGgmlExecutionProvider claim_synthesis_graph requires eager_load_model=1.");
+          "AivisGgmlExecutionProvider graph claim requires either eager_load_model=1 "
+          "or tts_cpp_library_path for EPContext lazy restore.");
     }
-    if (config.claim_synthesis_graph && config.gguf_path.empty()) {
+    if ((config.claim_synthesis_graph || config.claim_jp_bert_graph) &&
+        !config.eager_load_model &&
+        !PathExists(config.tts_cpp_library_path)) {
       return CreateStatus(
           api,
           ORT_INVALID_ARGUMENT,
-          "AivisGgmlExecutionProvider claim_synthesis_graph requires gguf_path.");
+          "AivisGgmlExecutionProvider graph claim requires an existing tts_cpp_library_path.");
     }
-    if (config.claim_jp_bert_graph && !config.eager_load_model) {
+    if (config.claim_synthesis_graph && config.eager_load_model && config.gguf_path.empty()) {
       return CreateStatus(
           api,
           ORT_INVALID_ARGUMENT,
-          "AivisGgmlExecutionProvider claim_jp_bert_graph requires eager_load_model=1.");
+          "AivisGgmlExecutionProvider claim_synthesis_graph with eager_load_model=1 requires gguf_path.");
     }
-    if (config.claim_jp_bert_graph && config.jp_bert_gguf_path.empty()) {
+    if (config.claim_jp_bert_graph && config.eager_load_model && config.jp_bert_gguf_path.empty()) {
       return CreateStatus(
           api,
           ORT_INVALID_ARGUMENT,
-          "AivisGgmlExecutionProvider claim_jp_bert_graph requires jp_bert_gguf_path.");
+          "AivisGgmlExecutionProvider claim_jp_bert_graph with eager_load_model=1 requires jp_bert_gguf_path.");
     }
   } catch (const std::exception& ex) {
     return CreateStatus(api, ORT_INVALID_ARGUMENT, ex.what());
@@ -1994,6 +1999,320 @@ bool ReadStringNodeAttribute(
   return status.IsOK();
 }
 
+bool ReadInt64NodeAttribute(
+    const Ort::ConstNode& node,
+    const std::string& name,
+    int64_t& value) {
+  Ort::ConstOpAttr attribute{nullptr};
+  Ort::Status status = node.GetAttributeByName(name, attribute);
+  if (!status.IsOK() || attribute == nullptr) {
+    return false;
+  }
+  status = attribute.GetValue<int64_t>(value);
+  return status.IsOK();
+}
+
+std::string JsonUnescape(const std::string& value) {
+  std::string output;
+  output.reserve(value.size());
+  for (size_t i = 0; i < value.size(); ++i) {
+    if (value[i] != '\\' || i + 1 >= value.size()) {
+      output.push_back(value[i]);
+      continue;
+    }
+    const char escaped = value[++i];
+    switch (escaped) {
+      case '\\':
+        output.push_back('\\');
+        break;
+      case '"':
+        output.push_back('"');
+        break;
+      case 'b':
+        output.push_back('\b');
+        break;
+      case 'f':
+        output.push_back('\f');
+        break;
+      case 'n':
+        output.push_back('\n');
+        break;
+      case 'r':
+        output.push_back('\r');
+        break;
+      case 't':
+        output.push_back('\t');
+        break;
+      default:
+        throw std::runtime_error("unsupported JSON escape sequence in Aivis GGML EPContext payload.");
+    }
+  }
+  return output;
+}
+
+bool ExtractJsonStringField(
+    const std::string& payload,
+    const std::string& key,
+    std::string& value) {
+  const std::string marker = "\"" + key + "\":\"";
+  const size_t value_start = payload.find(marker);
+  if (value_start == std::string::npos) {
+    return false;
+  }
+  size_t index = value_start + marker.size();
+  std::string raw_value;
+  bool escaped = false;
+  for (; index < payload.size(); ++index) {
+    const char c = payload[index];
+    if (escaped) {
+      raw_value.push_back('\\');
+      raw_value.push_back(c);
+      escaped = false;
+      continue;
+    }
+    if (c == '\\') {
+      escaped = true;
+      continue;
+    }
+    if (c == '"') {
+      value = JsonUnescape(raw_value);
+      return true;
+    }
+    raw_value.push_back(c);
+  }
+  throw std::runtime_error("unterminated JSON string in Aivis GGML EPContext payload.");
+}
+
+bool ExtractJsonIntField(
+    const std::string& payload,
+    const std::string& key,
+    int& value) {
+  const std::string marker = "\"" + key + "\":";
+  const size_t value_start = payload.find(marker);
+  if (value_start == std::string::npos) {
+    return false;
+  }
+  size_t index = value_start + marker.size();
+  while (index < payload.size() && std::isspace(static_cast<unsigned char>(payload[index]))) {
+    ++index;
+  }
+  size_t value_end = index;
+  while (value_end < payload.size() &&
+         (std::isdigit(static_cast<unsigned char>(payload[value_end])) ||
+          payload[value_end] == '-')) {
+    ++value_end;
+  }
+  if (value_end == index) {
+    return false;
+  }
+  value = ParseNonNegativeIntOption(payload.substr(index, value_end - index), 0, key.c_str());
+  return true;
+}
+
+std::filesystem::path EpContextInferenceBaseDirectory(
+    const AivisGgmlEpConfig& config,
+    const OrtGraph* ort_graph) {
+  if (!config.ort_ep_context_file_path.empty()) {
+    return EpContextModelDirectory(config);
+  }
+
+  Ort::ConstGraph graph{ort_graph};
+  const std::filesystem::path model_path = graph.GetModelPath();
+  const std::filesystem::path parent_path = model_path.parent_path();
+  if (!parent_path.empty()) {
+    return parent_path;
+  }
+  throw std::runtime_error(
+      "AivisGgmlExecutionProvider needs ep.context_file_path to resolve "
+      "external EPContext payloads or relative GGUF artifacts when the model "
+      "is loaded from memory.");
+}
+
+std::string ResolveEpContextArtifactPath(
+    const std::string& relative_path,
+    const std::filesystem::path& base_directory,
+    const char* artifact_name) {
+  if (relative_path.empty()) {
+    return "";
+  }
+  const std::filesystem::path path(relative_path);
+  if (path.is_absolute() || HasParentDirectoryTraversal(path)) {
+    throw std::runtime_error(
+        std::string("Aivis GGML EPContext artifact path is not portable: ") +
+        artifact_name);
+  }
+  std::error_code error;
+  const std::filesystem::path absolute_base =
+      std::filesystem::absolute(base_directory, error).lexically_normal();
+  if (error) {
+    throw std::runtime_error("could not resolve EPContext model directory.");
+  }
+  return (absolute_base / path).lexically_normal().string();
+}
+
+std::string ReadEpContextPayloadText(
+    const AivisGgmlEpConfig& config,
+    const OrtGraph* ort_graph,
+    const Ort::ConstNode& node) {
+  std::string ep_cache_context;
+  if (!ReadStringNodeAttribute(node, "ep_cache_context", ep_cache_context)) {
+    throw std::runtime_error("EPContext ep_cache_context attribute is missing or unreadable.");
+  }
+  int64_t embed_mode = 1;
+  if (!ReadInt64NodeAttribute(node, "embed_mode", embed_mode)) {
+    embed_mode = 1;
+  }
+  if (embed_mode == 1) {
+    return ep_cache_context;
+  }
+  if (embed_mode != 0) {
+    throw std::runtime_error("EPContext embed_mode must be 0 or 1.");
+  }
+
+  const std::filesystem::path base_directory =
+      EpContextInferenceBaseDirectory(config, ort_graph);
+  const std::string payload_path = ResolveEpContextArtifactPath(
+      ep_cache_context,
+      base_directory,
+      "ep_cache_context");
+  return ReadSmallTextFile(payload_path, 1024 * 1024);
+}
+
+struct EpContextPayload {
+  AivisGgmlGraphKind graph_kind = AivisGgmlGraphKind::Synthesis;
+  std::string backend;
+  std::string device;
+  std::string precision;
+  std::string cache_manifest_path;
+  std::string gguf_path;
+  std::string jp_bert_gguf_path;
+  int n_threads = 0;
+};
+
+EpContextPayload ParseEpContextPayload(
+    const AivisGgmlEpConfig& config,
+    const OrtGraph* ort_graph,
+    const Ort::ConstNode& node,
+    AivisGgmlGraphKind expected_graph_kind) {
+  const std::string payload = ReadEpContextPayloadText(config, ort_graph, node);
+  std::string value;
+  if (!ExtractJsonStringField(payload, "version", value) ||
+      value != "aivis-ggml-official-ep-context-v1") {
+    throw std::runtime_error("EPContext payload version is unsupported.");
+  }
+  if (!ExtractJsonStringField(payload, "provider_name", value) || value != kEpName) {
+    throw std::runtime_error("EPContext payload provider_name is unsupported.");
+  }
+  if (!ExtractJsonStringField(payload, "graph_kind", value)) {
+    throw std::runtime_error("EPContext payload graph_kind is missing.");
+  }
+
+  EpContextPayload parsed;
+  if (value == "synthesis") {
+    parsed.graph_kind = AivisGgmlGraphKind::Synthesis;
+  } else if (value == "jp-bert") {
+    parsed.graph_kind = AivisGgmlGraphKind::JpBert;
+  } else {
+    throw std::runtime_error("EPContext payload graph_kind is unsupported.");
+  }
+  if (parsed.graph_kind != expected_graph_kind) {
+    throw std::runtime_error("EPContext payload graph_kind does not match partition_name.");
+  }
+
+  ExtractJsonStringField(payload, "backend", parsed.backend);
+  ExtractJsonStringField(payload, "device", parsed.device);
+  ExtractJsonStringField(payload, "precision", parsed.precision);
+  ExtractJsonIntField(payload, "n_threads", parsed.n_threads);
+
+  const std::filesystem::path base_directory =
+      EpContextInferenceBaseDirectory(config, ort_graph);
+  if (ExtractJsonStringField(payload, "cache_manifest_path", value)) {
+    parsed.cache_manifest_path =
+        ResolveEpContextArtifactPath(value, base_directory, "cache_manifest_path");
+  }
+  if (ExtractJsonStringField(payload, "gguf_path", value)) {
+    parsed.gguf_path = ResolveEpContextArtifactPath(value, base_directory, "gguf_path");
+  }
+  if (ExtractJsonStringField(payload, "jp_bert_gguf_path", value)) {
+    parsed.jp_bert_gguf_path =
+        ResolveEpContextArtifactPath(value, base_directory, "jp_bert_gguf_path");
+  }
+  return parsed;
+}
+
+AivisGgmlEpConfig BuildConfigFromEpContextPayload(
+    const AivisGgmlEpConfig& base_config,
+    const OrtGraph* ort_graph,
+    AivisGgmlGraphKind graph_kind) {
+  Ort::ConstGraph graph{ort_graph};
+  const std::vector<Ort::ConstNode> nodes = graph.GetNodes();
+  if (nodes.size() != 1) {
+    throw std::runtime_error("EPContext graph must contain exactly one node.");
+  }
+
+  const EpContextPayload payload =
+      ParseEpContextPayload(base_config, ort_graph, nodes[0], graph_kind);
+  AivisGgmlEpConfig runtime_config = base_config;
+  runtime_config.eager_load_model = true;
+  if (!payload.backend.empty()) {
+    runtime_config.backend = payload.backend;
+  }
+  if (!payload.device.empty() && runtime_config.device.empty()) {
+    runtime_config.device = payload.device;
+  }
+  if (!payload.precision.empty()) {
+    runtime_config.precision = payload.precision;
+  }
+  if (runtime_config.n_threads == 0 && payload.n_threads > 0) {
+    runtime_config.n_threads = payload.n_threads;
+  }
+  if (runtime_config.cache_manifest_path.empty()) {
+    runtime_config.cache_manifest_path = payload.cache_manifest_path;
+  }
+  if (runtime_config.gguf_path.empty()) {
+    runtime_config.gguf_path = payload.gguf_path;
+  }
+  if (runtime_config.jp_bert_gguf_path.empty()) {
+    runtime_config.jp_bert_gguf_path = payload.jp_bert_gguf_path;
+  }
+  if (runtime_config.tts_cpp_library_path.empty()) {
+    throw std::runtime_error(
+        "EPContext lazy restore requires tts_cpp_library_path because the "
+        "portable context payload does not store deployment-specific shared library paths.");
+  }
+  if (graph_kind == AivisGgmlGraphKind::Synthesis && runtime_config.gguf_path.empty()) {
+    throw std::runtime_error("EPContext lazy restore could not resolve gguf_path.");
+  }
+  if (graph_kind == AivisGgmlGraphKind::JpBert && runtime_config.jp_bert_gguf_path.empty()) {
+    throw std::runtime_error("EPContext lazy restore could not resolve jp_bert_gguf_path.");
+  }
+  if (!PathExists(runtime_config.tts_cpp_library_path)) {
+    throw std::runtime_error("EPContext lazy restore tts_cpp_library_path does not exist.");
+  }
+  if (!runtime_config.gguf_path.empty() && !PathExists(runtime_config.gguf_path)) {
+    throw std::runtime_error("EPContext lazy restore gguf_path does not exist.");
+  }
+  if (!runtime_config.jp_bert_gguf_path.empty() &&
+      !PathExists(runtime_config.jp_bert_gguf_path)) {
+    throw std::runtime_error("EPContext lazy restore jp_bert_gguf_path does not exist.");
+  }
+  return runtime_config;
+}
+
+bool CanLazyRestoreEpContextRuntime(
+    const AivisGgmlEpConfig& config,
+    const OrtGraph* ort_graph,
+    AivisGgmlGraphKind graph_kind,
+    std::string& reason) {
+  try {
+    (void)BuildConfigFromEpContextPayload(config, ort_graph, graph_kind);
+    return true;
+  } catch (const std::exception& ex) {
+    reason = ex.what();
+    return false;
+  }
+}
+
 EpContextGateResult MatchAivisGgmlEpContextGraph(const OrtGraph* ort_graph) {
   EpContextGateResult result;
   Ort::ConstGraph graph{ort_graph};
@@ -2128,7 +2447,15 @@ struct AivisGgmlEp final : OrtEp {
             (ep_context_gate.graph_kind == AivisGgmlGraphKind::Synthesis
                  ? ep->runtime_->HasSynthesisModel()
                  : ep->runtime_->HasJpBertModel());
-        if (wants_graph && has_runtime) {
+        std::string lazy_restore_reason;
+        const bool can_lazy_restore =
+            !has_runtime &&
+            CanLazyRestoreEpContextRuntime(
+                ep->config_,
+                graph,
+                ep_context_gate.graph_kind,
+                lazy_restore_reason);
+        if (wants_graph && (has_runtime || can_lazy_restore)) {
           if (graph_support_info == nullptr) {
             return CreateStatus(
                 ep->ort_api_,
@@ -2161,7 +2488,9 @@ struct AivisGgmlEp final : OrtEp {
               ep->logger_,
               ORT_LOGGING_LEVEL_INFO,
               std::string("AivisGgmlExecutionProvider claimed an EPContext graph. graph_kind=") +
-                  GraphKindName(ep_context_gate.graph_kind) + ", " +
+                  GraphKindName(ep_context_gate.graph_kind) +
+                  ", runtime_ready=" + (has_runtime ? "true" : "false") +
+                  ", lazy_restore=" + (can_lazy_restore ? "true" : "false") + ", " +
                   ConfigSummary(ep->config_));
           return nullptr;
         }
@@ -2172,6 +2501,7 @@ struct AivisGgmlEp final : OrtEp {
             std::string("AivisGgmlExecutionProvider matched an EPContext graph, ")
                 + "but graph claiming or runtime readiness is disabled. graph_kind=" +
                 GraphKindName(ep_context_gate.graph_kind) + ", " +
+                "lazy_restore_reason=" + lazy_restore_reason + ", " +
                 ConfigSummary(ep->config_));
         return nullptr;
       }
@@ -2375,6 +2705,7 @@ struct AivisGgmlEp final : OrtEp {
         const EpContextGateResult ep_context_gate = MatchAivisGgmlEpContextGraph(graphs[i]);
         std::vector<size_t> input_indices;
         size_t primary_output_index = 0;
+        std::shared_ptr<TtsCppRuntime> runtime_for_graph = ep->runtime_;
         if (synthesis_gate.supported) {
           if (!ep->config_.claim_synthesis_graph) {
             throw std::runtime_error("AivisGgmlExecutionProvider Compile received a synthesis graph while claim_synthesis_graph is disabled.");
@@ -2404,8 +2735,17 @@ struct AivisGgmlEp final : OrtEp {
             if (!ep->config_.claim_synthesis_graph) {
               throw std::runtime_error("AivisGgmlExecutionProvider Compile received a synthesis EPContext graph while claim_synthesis_graph is disabled.");
             }
-            if (ep->runtime_ == nullptr || !ep->runtime_->HasSynthesisModel()) {
-              throw std::runtime_error("AivisGgmlExecutionProvider Compile requires a loaded synthesis runtime for EPContext inference.");
+            if (runtime_for_graph == nullptr || !runtime_for_graph->HasSynthesisModel()) {
+              const AivisGgmlEpConfig runtime_config =
+                  BuildConfigFromEpContextPayload(ep->config_, graphs[i], graph_kind);
+              bool reused_runtime = false;
+              runtime_for_graph = TtsCppRuntimeRegistry::Acquire(runtime_config, reused_runtime);
+              if (ep->runtime_ == nullptr) {
+                ep->runtime_ = runtime_for_graph;
+              }
+              TraceMessage(
+                  std::string(reused_runtime ? "reused" : "lazy-loaded") +
+                  " TTS.cpp runtime from synthesis EPContext payload");
             }
             input_indices = BuildInputIndices(graphs[i], kExpectedInputNames);
             primary_output_index = BuildOutputIndex(graphs[i], kExpectedFirstOutputName);
@@ -2413,8 +2753,17 @@ struct AivisGgmlEp final : OrtEp {
             if (!ep->config_.claim_jp_bert_graph) {
               throw std::runtime_error("AivisGgmlExecutionProvider Compile received a JP-BERT EPContext graph while claim_jp_bert_graph is disabled.");
             }
-            if (ep->runtime_ == nullptr || !ep->runtime_->HasJpBertModel()) {
-              throw std::runtime_error("AivisGgmlExecutionProvider Compile requires a loaded JP-BERT runtime for EPContext inference.");
+            if (runtime_for_graph == nullptr || !runtime_for_graph->HasJpBertModel()) {
+              const AivisGgmlEpConfig runtime_config =
+                  BuildConfigFromEpContextPayload(ep->config_, graphs[i], graph_kind);
+              bool reused_runtime = false;
+              runtime_for_graph = TtsCppRuntimeRegistry::Acquire(runtime_config, reused_runtime);
+              if (ep->runtime_ == nullptr) {
+                ep->runtime_ = runtime_for_graph;
+              }
+              TraceMessage(
+                  std::string(reused_runtime ? "reused" : "lazy-loaded") +
+                  " TTS.cpp runtime from JP-BERT EPContext payload");
             }
             input_indices = BuildInputIndices(graphs[i], kExpectedJpBertInputNames);
             primary_output_index = BuildOutputIndex(graphs[i], kExpectedJpBertOutputName);
@@ -2453,7 +2802,7 @@ struct AivisGgmlEp final : OrtEp {
         }
         node_compute_infos[i] = new AivisGgmlNodeComputeInfo(
             ep->ort_api_,
-            ep->runtime_,
+            runtime_for_graph,
             graph_kind,
             std::move(input_indices),
             primary_output_index);
@@ -2605,7 +2954,7 @@ struct AivisGgmlEpFactory final : OrtEpFactory {
       factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.runtime_registry_contract", kRuntimeRegistryContract);
       factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.tts_cpp_runtime_contract", kTtsCppRuntimeContract);
       factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.official_ep_context", "generation_supported");
-      factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.official_ep_context_inference", "provider_options_required");
+      factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.official_ep_context_inference", "lazy_artifact_restore_tts_library_required");
       factory->ort_api_.AddKeyValuePair(ep_metadata, "registration_name", factory->registration_name_.c_str());
       factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.supported_backends", "vulkan,metal,cpu");
       factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.supported_precision", "accurate,fast");

@@ -366,7 +366,7 @@ def build_compatibility_matrix() -> dict[str, Any]:
         "ep_context": {
             "lite_manifest": EP_CONTEXT_LITE_VERSION,
             "official_node_generation": "supported",
-            "official_node_inference": "provider_options_required",
+            "official_node_inference": "lazy_artifact_restore_tts_library_required",
         },
     }
 
