@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import onnx
 import onnxruntime as ort
 import pytest
@@ -18,6 +19,7 @@ from onnx import AttributeProto
 _ENABLE_ENV = "AIVIS_GGML_ONNX_EP_TEST"
 _CONVERT_ENABLE_ENV = "AIVIS_GGML_ONNX_EP_CONVERT_TEST"
 _JP_BERT_CONVERT_ENABLE_ENV = "AIVIS_GGML_ONNX_EP_JP_BERT_CONVERT_TEST"
+_JP_BERT_PARITY_ENABLE_ENV = "AIVIS_GGML_ONNX_EP_JP_BERT_PARITY_TEST"
 _PROVIDER_NAME = "AivisGgmlExecutionProvider"
 
 
@@ -283,6 +285,63 @@ def _embed_modes_from_env() -> list[bool]:
     return modes
 
 
+def _int_list_env(name: str, default: tuple[int, ...]) -> list[int]:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return list(default)
+    values: list[int] = []
+    for raw_item in raw_value.split(","):
+        item = raw_item.strip()
+        if item == "":
+            continue
+        values.append(int(item))
+    if not values:
+        raise AssertionError(f"{name} did not contain any token ids.")
+    return values
+
+
+def _float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None or raw_value.strip() == "":
+        return default
+    return float(raw_value)
+
+
+def _jp_bert_probe_inputs() -> dict[str, np.ndarray]:
+    input_ids = np.array(
+        [_int_list_env("AIVIS_GGML_ONNX_EP_JP_BERT_INPUT_IDS", (1, 5, 6, 2))],
+        dtype=np.int64,
+    )
+    attention_mask = np.array(
+        [
+            _int_list_env(
+                "AIVIS_GGML_ONNX_EP_JP_BERT_ATTENTION_MASK",
+                tuple(1 for _ in range(input_ids.shape[1])),
+            )
+        ],
+        dtype=np.int64,
+    )
+    if attention_mask.shape != input_ids.shape:
+        raise AssertionError(
+            "AIVIS_GGML_ONNX_EP_JP_BERT_ATTENTION_MASK must match input_ids length."
+        )
+    return {
+        "attention_mask": attention_mask,
+        "input_ids": input_ids,
+    }
+
+
+def _snr_db(reference: np.ndarray, candidate: np.ndarray) -> float:
+    noise = reference - candidate
+    noise_power = float(np.mean(np.square(noise, dtype=np.float64)))
+    if noise_power == 0.0:
+        return float("inf")
+    signal_power = float(np.mean(np.square(reference, dtype=np.float64)))
+    if signal_power == 0.0:
+        return float("-inf")
+    return 10.0 * float(np.log10(signal_power / noise_power))
+
+
 def test_aivis_ggml_onnx_ep_compiles_and_loads_ep_context_round_trip(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -511,3 +570,114 @@ def test_aivis_ggml_onnx_ep_writes_real_jp_bert_gguf(
     result_text = json.dumps(result.to_dict(), sort_keys=True)
     assert str(tmp_path) not in result_text
     assert str(source_parent) not in result_text
+
+
+def test_jp_bert_parity_probe_inputs_are_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The JP-BERT parity fixture accepts explicit token probes."""
+
+    monkeypatch.setenv("AIVIS_GGML_ONNX_EP_JP_BERT_INPUT_IDS", "1, 7, 8, 2")
+    monkeypatch.setenv("AIVIS_GGML_ONNX_EP_JP_BERT_ATTENTION_MASK", "1,1,1,1")
+    inputs = _jp_bert_probe_inputs()
+
+    assert inputs["input_ids"].tolist() == [[1, 7, 8, 2]]
+    assert inputs["attention_mask"].tolist() == [[1, 1, 1, 1]]
+    assert inputs["input_ids"].dtype == np.int64
+
+    monkeypatch.setenv("AIVIS_GGML_ONNX_EP_JP_BERT_ATTENTION_MASK", "1,1")
+    with pytest.raises(AssertionError, match="must match input_ids length"):
+        _jp_bert_probe_inputs()
+
+
+def test_aivis_ggml_onnx_ep_jp_bert_matches_onnx_cpu_features() -> None:
+    """Compare real JP-BERT Plugin EP features against ONNX CPU output."""
+
+    if os.getenv(_JP_BERT_PARITY_ENABLE_ENV) != "1":
+        pytest.skip(
+            f"Set {_JP_BERT_PARITY_ENABLE_ENV}=1 to run the JP-BERT parity test."
+        )
+
+    library_path = _required_path_env(
+        "AIVIS_GGML_ONNX_EP_LIBRARY_PATH",
+        enable_env=_JP_BERT_PARITY_ENABLE_ENV,
+    )
+    tts_cpp_library_path = _required_path_env(
+        "AIVIS_GGML_ONNX_EP_TTS_CPP_LIBRARY_PATH",
+        enable_env=_JP_BERT_PARITY_ENABLE_ENV,
+    )
+    jp_bert_onnx_path = _required_path_env(
+        "AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH",
+        enable_env=_JP_BERT_PARITY_ENABLE_ENV,
+    )
+    jp_bert_gguf_path = _required_path_env(
+        "AIVIS_GGML_ONNX_EP_JP_BERT_GGUF_PATH",
+        enable_env=_JP_BERT_PARITY_ENABLE_ENV,
+    )
+
+    _register_plugin_ep(library_path)
+
+    backend = os.getenv("AIVIS_GGML_ONNX_EP_BACKEND", "cpu")
+    precision = os.getenv("AIVIS_GGML_ONNX_EP_PRECISION", "accurate")
+    device = os.getenv("AIVIS_GGML_ONNX_EP_DEVICE", "")
+    n_threads = os.getenv("AIVIS_GGML_ONNX_EP_N_THREADS", "0")
+    inputs = _jp_bert_probe_inputs()
+
+    reference_session = ort.InferenceSession(
+        str(jp_bert_onnx_path),
+        providers=["CPUExecutionProvider"],
+        enable_fallback=False,
+    )
+    candidate_session = ort.InferenceSession(
+        str(jp_bert_onnx_path),
+        providers=[
+            (
+                _PROVIDER_NAME,
+                _provider_options(
+                    tts_cpp_library_path=tts_cpp_library_path,
+                    backend=backend,
+                    precision=precision,
+                    device=device,
+                    n_threads=n_threads,
+                    claim_synthesis_graph="0",
+                    claim_jp_bert_graph="1",
+                    eager_load_model="1",
+                    jp_bert_gguf_path=jp_bert_gguf_path,
+                ),
+            ),
+        ],
+        enable_fallback=False,
+    )
+
+    assert candidate_session.get_providers() == [_PROVIDER_NAME]
+    reference = reference_session.run(None, inputs)[0].astype(np.float32)
+    candidate = candidate_session.run(None, inputs)[0].astype(np.float32)
+
+    assert reference.shape == candidate.shape
+    assert candidate.shape == (inputs["input_ids"].shape[1], 1024)
+
+    diff = reference - candidate
+    max_abs_diff = float(np.max(np.abs(diff)))
+    rmse = float(np.sqrt(np.mean(np.square(diff, dtype=np.float64))))
+    snr_db = _snr_db(reference, candidate)
+    thresholds = {
+        "max_abs_diff": _float_env(
+            "AIVIS_GGML_ONNX_EP_JP_BERT_MAX_ABS_DIFF",
+            0.05,
+        ),
+        "rmse": _float_env("AIVIS_GGML_ONNX_EP_JP_BERT_RMSE", 0.005),
+        "snr_db": _float_env("AIVIS_GGML_ONNX_EP_JP_BERT_MIN_SNR_DB", 35.0),
+    }
+    metrics = {
+        "backend": backend,
+        "device": device,
+        "max_abs_diff": max_abs_diff,
+        "precision": precision,
+        "rmse": rmse,
+        "snr_db": snr_db,
+        "tokens": int(inputs["input_ids"].shape[1]),
+    }
+
+    assert max_abs_diff <= thresholds["max_abs_diff"], metrics
+    assert rmse <= thresholds["rmse"], metrics
+    assert snr_db >= thresholds["snr_db"], metrics

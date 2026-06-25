@@ -463,6 +463,28 @@ For Hugging Face checkpoint sources, use
 `AIVIS_GGML_ONNX_EP_JP_BERT_DIR=/path/to/deberta-v2-large-japanese-char-wwm`
 instead of `AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH`.
 
+Run the opt-in real JP-BERT feature parity fixture:
+
+```bash
+AIVIS_GGML_ONNX_EP_JP_BERT_PARITY_TEST=1 \
+AIVIS_GGML_ONNX_EP_LIBRARY_PATH=/path/to/libaivis_ggml_onnx_ep.so \
+AIVIS_GGML_ONNX_EP_TTS_CPP_LIBRARY_PATH=/path/to/libtts.so \
+AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH=/path/to/jp_bert/model.onnx \
+AIVIS_GGML_ONNX_EP_JP_BERT_GGUF_PATH=/path/to/jp_bert/model.gguf \
+uv run pytest test/integration/test_onnxruntime_ep_aivis_ggml.py::test_aivis_ggml_onnx_ep_jp_bert_matches_onnx_cpu_features -q
+```
+
+This fixture creates an ONNX CPU reference session and an
+`AivisGgmlExecutionProvider`-only candidate session, then compares the
+`[tokens, 1024]` JP-BERT feature tensor. Defaults are a short no-padding token
+probe (`1,5,6,2`), `max_abs_diff <= 0.05`, `rmse <= 0.005`, and
+`snr_db >= 35`. Override with
+`AIVIS_GGML_ONNX_EP_JP_BERT_INPUT_IDS`,
+`AIVIS_GGML_ONNX_EP_JP_BERT_ATTENTION_MASK`,
+`AIVIS_GGML_ONNX_EP_JP_BERT_MAX_ABS_DIFF`,
+`AIVIS_GGML_ONNX_EP_JP_BERT_RMSE`, and
+`AIVIS_GGML_ONNX_EP_JP_BERT_MIN_SNR_DB`.
+
 The hosted workflow `.github/workflows/test-onnxruntime-ggml-ep.yml` runs the
 public Plugin EP checks on push and pull request. On manual dispatch it can also
 run the real-artifact compiler and EPContext matrix when given a bundle URL via
@@ -486,7 +508,9 @@ The workflow builds the native Plugin EP against ONNX Runtime 1.26 headers,
 smoke-registers it, runs `compile_cache.py` with the synthesis files, generates
 `jp_bert/model.gguf` with `compile_jp_bert.py` when `jp_bert/model.onnx` is
 present and the GGUF is missing, runs the JP-BERT writer fixture when
-`jp_bert/model.onnx` is present, and runs the EPContext round-trip fixture. The
+`jp_bert/model.onnx` is present, runs the JP-BERT ONNX CPU parity fixture when
+both JP-BERT ONNX and GGUF artifacts are present, and runs the EPContext
+round-trip fixture. The
 optional
 `artifact_bundle_sha256` input or
 `AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` secret pins the downloaded bundle.

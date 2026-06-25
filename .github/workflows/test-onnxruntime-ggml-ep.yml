@@ -192,6 +192,13 @@ jobs:
               -q
           fi
 
+          if [[ -f "$AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH" && -f "$AIVIS_GGML_ONNX_EP_JP_BERT_GGUF_PATH" ]]; then
+            AIVIS_GGML_ONNX_EP_JP_BERT_PARITY_TEST=1 \
+            uv run pytest \
+              test/integration/test_onnxruntime_ep_aivis_ggml.py::test_aivis_ggml_onnx_ep_jp_bert_matches_onnx_cpu_features \
+              -q
+          fi
+
           export AIVIS_GGML_ONNX_EP_TEST=1
           if [[ ! -f "$AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH" || ! -f "$AIVIS_GGML_ONNX_EP_JP_BERT_GGUF_PATH" ]]; then
             unset AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH

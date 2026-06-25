@@ -197,6 +197,8 @@ Compile rules:
   `claim_jp_bert_graph=1` and `jp_bert_gguf_path` are provided.
 - With `claim_jp_bert_graph=1`, a supported JP-BERT ONNX session is claimed by
   `AivisGgmlExecutionProvider` and returns `[tokens, 1024]` features.
+- JP-BERT feature output is compared against ONNX CPU for matching shape, max
+  absolute difference, RMSE, and SNR.
 - Short, medium, and long synthesis outputs are compared against ONNX CPU for
   sample count, max absolute difference, RMSE, SNR, and RTF.
 
@@ -304,8 +306,9 @@ logic back into AivisSpeech Engine.
      tests, native build, and native smoke registration. Manual dispatch can
      download a real-artifact bundle, run the synthesis compiler, generate the
      JP-BERT GGUF from `jp_bert/model.onnx` when the bundle does not already
-     include `jp_bert/model.gguf`, run the JP-BERT writer fixture, and run the
-     EPContext round-trip matrix.
+     include `jp_bert/model.gguf`, run the JP-BERT writer fixture, compare
+     JP-BERT Plugin EP feature output against ONNX CPU, and run the EPContext
+     round-trip matrix.
    - The package now owns a TTS.cpp-compatible Style-Bert-VITS2 JP-BERT GGUF
      writer. It maps Hugging Face DeBERTa tensor names into TTS.cpp's compact
      JP-BERT tensor schema, writes the tokenizer/config metadata consumed by
@@ -313,8 +316,9 @@ logic back into AivisSpeech Engine.
      missing. It supports JP-BERT ONNX initializers and Hugging Face checkpoint
      directories (`model.safetensors` or `pytorch_model.bin`).
    - Remaining production work: expand the hosted real-artifact matrix across
-     ORT/TTS.cpp/GGUF schema versions and add a pinned production JP-BERT
-     loader/feature-output fixture once those artifacts are available in CI.
+     ORT/TTS.cpp/GGUF schema versions and pin a production artifact bundle so
+     the JP-BERT writer/parity fixtures run on a scheduled path, not only on
+     manual dispatch.
    - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
      TTS.cpp C API version, GGUF schema version, synthesis signature contract,
      and JP-BERT signature contract.
