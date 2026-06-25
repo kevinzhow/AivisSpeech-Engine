@@ -258,3 +258,43 @@ def validate_cache_main() -> None:
     )
     if errors:
         raise SystemExit(1)
+
+
+def validate_ep_context_payload_main() -> None:
+    """Validate an official ORT EPContext payload before deployment."""
+
+    from onnxruntime_ep_aivis_ggml.cache import (
+        SUPPORTED_OFFICIAL_EP_CONTEXT_GRAPH_KINDS,
+        load_official_ep_context_payload,
+        validate_official_ep_context_payload,
+    )
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("payload_path", type=Path)
+    parser.add_argument(
+        "--graph-kind",
+        choices=SUPPORTED_OFFICIAL_EP_CONTEXT_GRAPH_KINDS,
+        default=None,
+        help="Expected Aivis graph kind for this EPContext payload.",
+    )
+    args = parser.parse_args()
+
+    payload = load_official_ep_context_payload(args.payload_path)
+    errors = validate_official_ep_context_payload(
+        payload,
+        graph_kind=args.graph_kind,
+    )
+    print(
+        json.dumps(
+            {
+                "payload_path": str(args.payload_path),
+                "valid": len(errors) == 0,
+                "errors": errors,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if errors:
+        raise SystemExit(1)

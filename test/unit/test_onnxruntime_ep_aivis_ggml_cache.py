@@ -1,5 +1,6 @@
 """Tests for Aivis GGML ONNX Plugin EP cache manifest planning."""
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -199,6 +200,142 @@ def test_validate_cache_manifest_checks_contracts_and_portable_artifacts(
         "artifact_path_not_portable:gguf",
         "artifact_path_not_portable:debug",
     }
+
+
+def test_build_official_ep_context_payload_accepts_portable_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Official EPContext payloads keep runtime artifacts portable."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cache
+
+    payload = cache.build_official_ep_context_payload(
+        graph_kind="synthesis",
+        graph_name="main_graph",
+        graph_index=0,
+        backend="vulkan",
+        device="0",
+        precision="accurate",
+        n_threads=4,
+        cache_manifest_path="cache/manifest.json",
+        gguf_path="cache/model.gguf",
+        jp_bert_gguf_path="",
+    )
+
+    assert payload["version"] == "aivis-ggml-official-ep-context-v1"
+    assert payload["provider_name"] == "AivisGgmlExecutionProvider"
+    assert payload["runtime_registry_contract"] == "aivis-ggml-runtime-registry-v1"
+    assert payload["tts_cpp_runtime_contract"] == "tts-style-bert-vits2-c-api-v1"
+    assert payload["artifacts"]["gguf_path"] == "cache/model.gguf"
+    assert "tts_cpp_library_path" not in json.dumps(payload, sort_keys=True)
+    assert cache.validate_official_ep_context_payload(
+        payload,
+        graph_kind="synthesis",
+    ) == ()
+
+
+def test_build_official_ep_context_payload_accepts_portable_jp_bert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JP-BERT EPContext payloads require the sidecar JP-BERT GGUF."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cache
+
+    payload = cache.build_official_ep_context_payload(
+        graph_kind="jp-bert",
+        graph_name="jp_bert_graph",
+        graph_index=1,
+        backend="metal",
+        precision="fast",
+        cache_manifest_path="cache/manifest.json",
+        gguf_path="",
+        jp_bert_gguf_path="cache/jp-bert.gguf",
+    )
+
+    assert payload["artifacts"]["jp_bert_gguf_path"] == "cache/jp-bert.gguf"
+    assert cache.validate_official_ep_context_payload(
+        payload,
+        graph_kind="jp-bert",
+    ) == ()
+
+
+def test_validate_official_ep_context_payload_rejects_non_portable_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EPContext artifacts must not encode machine-local paths."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cache
+
+    payload = cache.build_official_ep_context_payload(
+        graph_kind="synthesis",
+        graph_name="main_graph",
+        graph_index=0,
+        backend="vulkan",
+        precision="accurate",
+        cache_manifest_path="cache/manifest.json",
+        gguf_path="cache/model.gguf",
+        jp_bert_gguf_path="cache/jp-bert.gguf",
+    )
+    payload["artifacts"]["gguf_path"] = "/opt/aivis/cache/model.gguf"
+    payload["artifacts"]["jp_bert_gguf_path"] = "../jp-bert.gguf"
+
+    assert set(cache.validate_official_ep_context_payload(payload)) == {
+        "ep_context_payload_artifact_path_not_portable:gguf_path",
+        "ep_context_payload_artifact_path_not_portable:jp_bert_gguf_path",
+    }
+
+
+def test_validate_official_ep_context_payload_rejects_embedded_tts_library_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Portable EPContext payloads cannot own deployment-specific library paths."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cache
+
+    payload = cache.build_official_ep_context_payload(
+        graph_kind="synthesis",
+        graph_name="main_graph",
+        graph_index=0,
+        backend="cpu",
+        precision="accurate",
+        cache_manifest_path="cache/manifest.json",
+        gguf_path="cache/model.gguf",
+        jp_bert_gguf_path="",
+    )
+    payload["artifacts"]["tts_cpp_library_path"] = "lib/libtts.so"
+
+    assert cache.validate_official_ep_context_payload(payload) == (
+        "ep_context_payload_tts_library_path_embedded",
+    )
+
+
+def test_validate_official_ep_context_payload_rejects_graph_kind_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Payload graph kind must match the expected EPContext partition."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cache
+
+    payload = cache.build_official_ep_context_payload(
+        graph_kind="synthesis",
+        graph_name="main_graph",
+        graph_index=0,
+        backend="vulkan",
+        precision="accurate",
+        cache_manifest_path="cache/manifest.json",
+        gguf_path="cache/model.gguf",
+        jp_bert_gguf_path="",
+    )
+
+    assert cache.validate_official_ep_context_payload(
+        payload,
+        graph_kind="jp-bert",
+    ) == ("ep_context_payload_graph_kind_mismatch",)
 
 
 def test_initializer_tensor_pack_preserves_initializer_order_and_bytes(

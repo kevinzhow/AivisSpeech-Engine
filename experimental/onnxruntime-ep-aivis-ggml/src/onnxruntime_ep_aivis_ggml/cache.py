@@ -32,12 +32,21 @@ from onnxruntime_ep_aivis_ggml.tts_cpp_mapping import (
 
 CACHE_MANIFEST_VERSION = "aivis-ggml-onnx-cache-v1"
 EP_CONTEXT_LITE_VERSION = "aivis-ggml-ep-context-lite-v1"
+OFFICIAL_EP_CONTEXT_VERSION = "aivis-ggml-official-ep-context-v1"
 RUNTIME_REGISTRY_CONTRACT = "aivis-ggml-runtime-registry-v1"
 TTS_CPP_RUNTIME_CONTRACT = "tts-style-bert-vits2-c-api-v1"
 COMPATIBILITY_MATRIX_VERSION = "aivis-ggml-compatibility-matrix-v1"
 PROVIDER_NAME = "AivisGgmlExecutionProvider"
 PROVIDER_VERSION = "0.1.0"
 DEFAULT_CONVERTER_VERSION = PROVIDER_VERSION
+SUPPORTED_OFFICIAL_EP_CONTEXT_GRAPH_KINDS = ("synthesis", "jp-bert")
+SUPPORTED_BACKENDS = ("vulkan", "metal", "cpu")
+SUPPORTED_PRECISIONS = ("accurate", "fast")
+OFFICIAL_EP_CONTEXT_ARTIFACT_KEYS = (
+    "cache_manifest_path",
+    "gguf_path",
+    "jp_bert_gguf_path",
+)
 
 REQUIRED_TTS_CPP_SYMBOLS = (
     "tts_style_bert_vits2_last_error",
@@ -367,6 +376,8 @@ def build_compatibility_matrix() -> dict[str, Any]:
             "lite_manifest": EP_CONTEXT_LITE_VERSION,
             "official_node_generation": "supported",
             "official_node_inference": "lazy_artifact_restore_tts_library_required",
+            "official_payload_version": OFFICIAL_EP_CONTEXT_VERSION,
+            "official_payload_validator": "supported",
         },
     }
 
@@ -395,6 +406,158 @@ def build_ep_context_lite(
             "status": "manifest_only",
         },
     }
+
+
+def build_official_ep_context_payload(
+    *,
+    graph_kind: str,
+    graph_name: str,
+    graph_index: int,
+    backend: str,
+    precision: str,
+    cache_manifest_path: str | Path | None,
+    gguf_path: str | Path | None,
+    jp_bert_gguf_path: str | Path | None,
+    device: str = "",
+    n_threads: int = 0,
+) -> dict[str, Any]:
+    """Build the portable JSON payload stored by official ORT EPContext nodes."""
+
+    payload = {
+        "version": OFFICIAL_EP_CONTEXT_VERSION,
+        "provider_name": PROVIDER_NAME,
+        "provider_version": PROVIDER_VERSION,
+        "runtime_registry_contract": RUNTIME_REGISTRY_CONTRACT,
+        "tts_cpp_runtime_contract": TTS_CPP_RUNTIME_CONTRACT,
+        "graph_kind": graph_kind,
+        "graph_name": graph_name,
+        "graph_index": graph_index,
+        "backend": backend,
+        "device": device,
+        "precision": precision,
+        "n_threads": n_threads,
+        "artifacts": {
+            "cache_manifest_path": _artifact_path_text(cache_manifest_path),
+            "gguf_path": _artifact_path_text(gguf_path),
+            "jp_bert_gguf_path": _artifact_path_text(jp_bert_gguf_path),
+        },
+    }
+    errors = validate_official_ep_context_payload(payload, graph_kind=graph_kind)
+    if errors:
+        raise ValueError(
+            "Invalid Aivis GGML EPContext payload: " + ", ".join(errors)
+        )
+    return payload
+
+
+def validate_official_ep_context_payload(
+    payload: dict[str, Any],
+    *,
+    graph_kind: str | None = None,
+) -> tuple[str, ...]:
+    """Validate the official ORT EPContext payload contract before deployment."""
+
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return ("ep_context_payload_root_invalid",)
+
+    _validate_expected_string(
+        errors,
+        payload,
+        "version",
+        OFFICIAL_EP_CONTEXT_VERSION,
+        "ep_context_payload_version_mismatch",
+    )
+    _validate_expected_string(
+        errors,
+        payload,
+        "provider_name",
+        PROVIDER_NAME,
+        "ep_context_payload_provider_mismatch",
+    )
+    _validate_expected_string(
+        errors,
+        payload,
+        "provider_version",
+        PROVIDER_VERSION,
+        "ep_context_payload_provider_version_mismatch",
+    )
+    _validate_expected_string(
+        errors,
+        payload,
+        "runtime_registry_contract",
+        RUNTIME_REGISTRY_CONTRACT,
+        "ep_context_payload_runtime_registry_contract_mismatch",
+    )
+    _validate_expected_string(
+        errors,
+        payload,
+        "tts_cpp_runtime_contract",
+        TTS_CPP_RUNTIME_CONTRACT,
+        "ep_context_payload_tts_cpp_runtime_contract_mismatch",
+    )
+
+    payload_graph_kind = payload.get("graph_kind")
+    if payload_graph_kind not in SUPPORTED_OFFICIAL_EP_CONTEXT_GRAPH_KINDS:
+        errors.append("ep_context_payload_graph_kind_invalid")
+    if graph_kind is not None and payload_graph_kind != graph_kind:
+        errors.append("ep_context_payload_graph_kind_mismatch")
+
+    graph_index = payload.get("graph_index")
+    if not _is_non_negative_int(graph_index):
+        errors.append("ep_context_payload_graph_index_invalid")
+
+    backend = payload.get("backend")
+    if backend not in SUPPORTED_BACKENDS:
+        errors.append("ep_context_payload_backend_invalid")
+
+    precision = payload.get("precision")
+    if precision not in SUPPORTED_PRECISIONS:
+        errors.append("ep_context_payload_precision_invalid")
+
+    device = payload.get("device")
+    if not isinstance(device, str):
+        errors.append("ep_context_payload_device_invalid")
+
+    n_threads = payload.get("n_threads")
+    if not _is_non_negative_int(n_threads):
+        errors.append("ep_context_payload_n_threads_invalid")
+
+    if _contains_key(payload, "tts_cpp_library_path"):
+        errors.append("ep_context_payload_tts_library_path_embedded")
+
+    artifact_paths: dict[str, str] = {}
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, dict):
+        errors.append("ep_context_payload_artifacts_missing")
+    else:
+        for name in OFFICIAL_EP_CONTEXT_ARTIFACT_KEYS:
+            value = artifacts.get(name)
+            if value is None:
+                errors.append(f"ep_context_payload_artifact_missing:{name}")
+                continue
+            if not isinstance(value, str):
+                errors.append(f"ep_context_payload_artifact_path_invalid:{name}")
+                continue
+            artifact_paths[name] = value
+            if value and _is_absolute_or_parent_relative(value):
+                errors.append(f"ep_context_payload_artifact_path_not_portable:{name}")
+
+    if payload_graph_kind == "synthesis" and not artifact_paths.get("gguf_path"):
+        errors.append("ep_context_payload_artifact_required:synthesis:gguf_path")
+    if payload_graph_kind == "jp-bert" and not artifact_paths.get("jp_bert_gguf_path"):
+        errors.append("ep_context_payload_artifact_required:jp-bert:jp_bert_gguf_path")
+
+    return tuple(errors)
+
+
+def load_official_ep_context_payload(path: str | Path) -> dict[str, Any]:
+    """Load an official ORT EPContext payload JSON object from disk."""
+
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("EPContext payload root must be a JSON object.")
+    return payload
 
 
 def validate_cache_manifest(
@@ -497,6 +660,35 @@ def _is_absolute_or_parent_relative(value: str) -> bool:
     if posix_path.is_absolute() or windows_path.is_absolute():
         return True
     return ".." in posix_path.parts or ".." in windows_path.parts
+
+
+def _artifact_path_text(value: str | Path | None) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _is_non_negative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_expected_string(
+    errors: list[str],
+    payload: dict[str, Any],
+    key: str,
+    expected: str,
+    error: str,
+) -> None:
+    if payload.get(key) != expected:
+        errors.append(error)
+
+
+def _contains_key(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_contains_key(child, key) for child in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_key(child, key) for child in value)
+    return False
 
 
 def build_converter_readiness(

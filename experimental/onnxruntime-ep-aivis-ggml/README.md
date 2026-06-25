@@ -101,10 +101,14 @@ This directory currently provides:
 - A cache manifest validator for deployment gates. It checks manifest version,
   signature/runtime contracts, EPContext-lite metadata, readiness status when
   requested, and portable relative artifact paths.
+- An official ORT EPContext payload validator. It checks the generated JSON
+  payload contract, graph kind, provider/runtime versions, backend options,
+  portable GGUF/cache artifact paths, and rejects deployment-specific
+  `tts_cpp_library_path` leakage.
 - A deployment compatibility matrix in every manifest. It records the provider
   version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API contract,
   GGUF schema expectation, signature contract versions, and official
-  EPContext support level.
+  EPContext support level and payload version.
 - A native TTS.cpp binding readiness gate. With `eager_load_model=1`,
   `CreateEp()` dlopens `tts_cpp_library_path`, resolves the Style-Bert-VITS2
   and JP-BERT C API symbols, and loads configured GGUF paths. This keeps
@@ -207,14 +211,16 @@ manifests.
    `source=AivisGgmlExecutionProvider` nodes, restores relative GGUF/cache
    artifact paths from the payload, lazy-loads TTS.cpp through the provided
    `tts_cpp_library_path`, and routes compute through the same synthesis/JP-BERT
-   bridge.
+   bridge. The generated payload contract is also machine-checkable through
+   `validate_ep_context_payload.py`.
 5. Offline compiler lifecycle: partially implemented. The cache manifest
    validator now provides a deployment gate for manifest/runtime/signature and
-   portable artifact layout compatibility. The manifest also records an
-   explicit compatibility matrix covering ORT Plugin EP API version, TTS.cpp C
-   API contract, GGUF schema expectation, model signature contracts, and
-   EPContext support level. The remaining work is broader real-model CI
-   fixtures for GGUF generation and EPContext round trips.
+   portable artifact layout compatibility, while the EPContext payload validator
+   gates generated ORT context artifacts. The manifest also records an explicit
+   compatibility matrix covering ORT Plugin EP API version, TTS.cpp C API
+   contract, GGUF schema expectation, model signature contracts, EPContext
+   support level, and EPContext payload version. The remaining work is broader
+   real-model CI fixtures for GGUF generation and EPContext round trips.
 
 ## Native Build
 
@@ -327,4 +333,13 @@ Validate a prepared cache manifest before deployment:
 python tools/validate_cache_manifest.py /path/to/cache/<key>/manifest.json --require-ready
 # or, after installing the package:
 aivis-ggml-onnx-ep-validate-cache /path/to/cache/<key>/manifest.json --require-ready
+```
+
+Validate an official ORT EPContext payload before shipping a precompiled
+context model:
+
+```bash
+python tools/validate_ep_context_payload.py /path/to/context/model_aivis_ggml_synthesis_0.json --graph-kind synthesis
+# or, after installing the package:
+aivis-ggml-onnx-ep-validate-ep-context /path/to/context/model_aivis_ggml_synthesis_0.json --graph-kind synthesis
 ```

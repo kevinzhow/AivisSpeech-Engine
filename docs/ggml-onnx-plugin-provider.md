@@ -257,16 +257,22 @@ logic back into AivisSpeech Engine.
      compute through the existing synthesis/JP-BERT bridge.
    - The context payload intentionally does not store `tts_cpp_library_path`
      because shared library paths are deployment-specific.
+   - `validate_ep_context_payload.py` can validate the generated payload before
+     deployment: version/provider/runtime contracts, graph kind, backend
+     options, portable artifact paths, and absence of deployment-specific TTS.cpp
+     library paths.
 
 5. Offline compiler lifecycle and compatibility matrix.
    - Status: partially implemented.
    - A cache manifest validator now checks manifest version,
      signature/runtime contracts, EPContext-lite metadata, optional ready
      status, and portable relative artifact paths before deployment.
+   - An official EPContext payload validator now gates generated ORT context
+     artifacts separately from cache manifests.
    - Every cache manifest records an explicit compatibility matrix: provider
      version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API
      contract, GGUF schema expectation, synthesis/JP-BERT signature contracts,
-     and EPContext support level.
+     EPContext support level, and EPContext payload version.
    - Promote `prepare_cache --write-gguf` from a local helper to a versioned
      offline compiler command with real-model fixture tests for synthesis GGUF
      output, JP-BERT GGUF output, and EPContext round trips.
