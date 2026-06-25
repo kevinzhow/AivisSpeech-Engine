@@ -316,7 +316,9 @@ logic back into AivisSpeech Engine.
      JP-BERT GGUF from `jp_bert/model.onnx` when the bundle does not already
      include `jp_bert/model.gguf`, run the JP-BERT writer fixture, compare
      JP-BERT Plugin EP feature output against ONNX CPU, and run the EPContext
-     round-trip matrix.
+     round-trip matrix. Scheduled runs fail closed unless the pinned bundle URL
+     and SHA secrets are configured, so the production matrix cannot silently
+     skip real artifacts.
    - The package now owns a TTS.cpp-compatible Style-Bert-VITS2 JP-BERT GGUF
      writer. It maps Hugging Face DeBERTa tensor names into TTS.cpp's compact
      JP-BERT tensor schema, writes the tokenizer/config metadata consumed by
@@ -324,8 +326,8 @@ logic back into AivisSpeech Engine.
      missing. It supports JP-BERT ONNX initializers and Hugging Face checkpoint
      directories (`model.safetensors` or `pytorch_model.bin`).
    - Remaining production work: configure the pinned production artifact bundle
-     URL/SHA secrets and add additional artifact bundle manifests for more
-     ORT/TTS.cpp/GGUF schema versions.
+     URL/SHA secrets in the repository environment and add additional artifact
+     bundle manifests for more ORT/TTS.cpp/GGUF schema versions.
    - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
      TTS.cpp C API version, GGUF schema version, synthesis signature contract,
      and JP-BERT signature contract.

@@ -190,3 +190,27 @@ def test_validate_artifact_bundle_cli_outputs_portable_report(
     assert report["valid"] is True
     assert report["manifest_present"] is True
     assert str(tmp_path) not in json.dumps(report, sort_keys=True)
+
+
+def test_scheduled_workflow_requires_pinned_real_artifact_bundle() -> None:
+    """The weekly real-artifact matrix must fail closed without pinned inputs."""
+
+    workflow_path = (
+        Path(__file__).parents[2]
+        / ".github"
+        / "workflows"
+        / "test-onnxruntime-ggml-ep.yml"
+    )
+    workflow = workflow_path.read_text(encoding="utf-8")
+
+    assert "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL" in workflow
+    assert "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256" in workflow
+    assert (
+        "Scheduled real-artifact validation requires "
+        "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL"
+    ) in workflow
+    assert (
+        "Scheduled real-artifact validation requires "
+        "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256"
+    ) in workflow
+    assert 'if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then' in workflow

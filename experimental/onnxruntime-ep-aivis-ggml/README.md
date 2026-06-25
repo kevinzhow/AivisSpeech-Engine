@@ -563,3 +563,8 @@ runs the JP-BERT ONNX CPU parity fixture when both JP-BERT ONNX and GGUF
 artifacts are present, and runs the EPContext round-trip fixture. The optional
 `artifact_bundle_sha256` input or
 `AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` secret pins the downloaded bundle.
+Manual dispatch may omit the bundle to run only public checks. The weekly
+scheduled run fails closed unless both
+`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL` and
+`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` are configured, so the production
+matrix cannot silently degrade into a no-artifact smoke run.
