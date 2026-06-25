@@ -480,3 +480,42 @@ def validate_artifact_bundle_main() -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     if report["errors"]:
         raise SystemExit(1)
+
+
+def write_artifact_bundle_manifest_main() -> None:
+    """Write the canonical manifest for a hosted real-artifact bundle."""
+
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        default_real_artifact_bundle_matrix_id,
+        write_real_artifact_bundle_manifest,
+    )
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("bundle_dir", type=Path)
+    parser.add_argument(
+        "--matrix-id",
+        default=None,
+        help=(
+            "Compatibility matrix id to record. Defaults to the current "
+            f"provider contract: {default_real_artifact_bundle_matrix_id()}."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing aivis_ggml_ep_bundle.json.",
+    )
+    args = parser.parse_args()
+
+    try:
+        report = write_real_artifact_bundle_manifest(
+            args.bundle_dir,
+            matrix_id=args.matrix_id,
+            overwrite=args.overwrite,
+        )
+    except FileExistsError as ex:
+        parser.error(str(ex))
+
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    if report["errors"]:
+        raise SystemExit(1)

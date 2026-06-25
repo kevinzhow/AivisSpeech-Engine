@@ -35,6 +35,74 @@ OPTIONAL_ARTIFACTS = {
 }
 
 
+def default_real_artifact_bundle_matrix_id() -> str:
+    """Return the canonical matrix id for the current provider contract."""
+
+    return (
+        f"ort-{TESTED_ORT_RUNTIME_VERSION}"
+        f"-epapi{ORT_PLUGIN_EP_API_VERSION}"
+        f"-provider{PROVIDER_VERSION}"
+        f"-tts-abi{EXPECTED_TTS_CPP_RUNTIME_ABI_VERSION}"
+        f"-gguf{EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION}"
+    )
+
+
+def build_real_artifact_bundle_manifest(
+    bundle_dir: str | Path,
+    *,
+    matrix_id: str | None = None,
+) -> dict[str, Any]:
+    """Build the canonical version manifest for a real-artifact bundle."""
+
+    root = Path(bundle_dir)
+    artifacts = dict(REQUIRED_ARTIFACTS)
+    for name, relative_path in OPTIONAL_ARTIFACTS.items():
+        if (root / relative_path).is_file():
+            artifacts[name] = relative_path
+
+    return {
+        "artifacts": artifacts,
+        "matrix_id": matrix_id or default_real_artifact_bundle_matrix_id(),
+        "onnxruntime": {
+            "plugin_ep_api_version": ORT_PLUGIN_EP_API_VERSION,
+            "tested_runtime_version": TESTED_ORT_RUNTIME_VERSION,
+        },
+        "provider": {
+            "name": PROVIDER_NAME,
+            "version": PROVIDER_VERSION,
+        },
+        "tts_cpp": {
+            "gguf_schema_version": EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION,
+            "runtime_abi_version": EXPECTED_TTS_CPP_RUNTIME_ABI_VERSION,
+        },
+        "version": REAL_ARTIFACT_BUNDLE_VERSION,
+    }
+
+
+def write_real_artifact_bundle_manifest(
+    bundle_dir: str | Path,
+    *,
+    matrix_id: str | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Write and validate the canonical real-artifact bundle manifest."""
+
+    root = Path(bundle_dir)
+    manifest_path = root / REAL_ARTIFACT_BUNDLE_MANIFEST_NAME
+    if manifest_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"{REAL_ARTIFACT_BUNDLE_MANIFEST_NAME} already exists; "
+            "pass overwrite=True to replace it."
+        )
+
+    manifest = build_real_artifact_bundle_manifest(root, matrix_id=matrix_id)
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return build_real_artifact_bundle_report(root, require_manifest=True)
+
+
 def validate_real_artifact_bundle(
     bundle_dir: str | Path,
     *,

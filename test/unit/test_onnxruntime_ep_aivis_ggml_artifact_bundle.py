@@ -132,6 +132,34 @@ def test_validate_real_artifact_bundle_accepts_versioned_manifest(
     }
 
 
+def test_write_real_artifact_bundle_manifest_generates_canonical_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        default_real_artifact_bundle_matrix_id,
+        write_real_artifact_bundle_manifest,
+    )
+
+    _write_bundle_files(tmp_path)
+
+    report = write_real_artifact_bundle_manifest(tmp_path)
+
+    manifest_path = tmp_path / "aivis_ggml_ep_bundle.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert report["valid"] is True
+    assert report["errors"] == ()
+    assert manifest["matrix_id"] == default_real_artifact_bundle_matrix_id()
+    assert manifest["artifacts"]["lib_tts"] == "lib/libtts.so"
+    assert manifest["artifacts"]["jp_bert_gguf"] == "jp_bert/model.gguf"
+    assert str(tmp_path) not in json.dumps(manifest, sort_keys=True)
+    assert str(tmp_path) not in json.dumps(report, sort_keys=True)
+
+    with pytest.raises(FileExistsError):
+        write_real_artifact_bundle_manifest(tmp_path)
+
+
 def test_validate_real_artifact_bundle_rejects_manifest_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -190,6 +218,39 @@ def test_validate_artifact_bundle_cli_outputs_portable_report(
     assert report["valid"] is True
     assert report["manifest_present"] is True
     assert str(tmp_path) not in json.dumps(report, sort_keys=True)
+
+
+def test_write_artifact_bundle_manifest_cli_outputs_portable_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cli
+
+    _write_bundle_files(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "write_artifact_bundle_manifest.py",
+            str(tmp_path),
+            "--matrix-id",
+            "nightly-ort126-ttsabi1",
+        ],
+    )
+
+    cli.write_artifact_bundle_manifest_main()
+
+    report = json.loads(capsys.readouterr().out)
+    manifest = json.loads(
+        (tmp_path / "aivis_ggml_ep_bundle.json").read_text(encoding="utf-8")
+    )
+    assert report["valid"] is True
+    assert report["manifest"]["matrix_id"] == "nightly-ort126-ttsabi1"
+    assert manifest["matrix_id"] == "nightly-ort126-ttsabi1"
+    assert str(tmp_path) not in json.dumps(report, sort_keys=True)
+    assert str(tmp_path) not in json.dumps(manifest, sort_keys=True)
 
 
 def test_scheduled_workflow_requires_pinned_real_artifact_bundle() -> None:

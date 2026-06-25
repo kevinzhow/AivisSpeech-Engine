@@ -308,6 +308,10 @@ logic back into AivisSpeech Engine.
      `aivis_ggml_ep_bundle.json`, which records provider version, ORT runtime
      version/API, TTS.cpp runtime ABI, GGUF schema version, matrix id, and
      portable artifact paths.
+   - `aivis-ggml-onnx-ep-write-artifact-bundle-manifest` generates that bundle
+     manifest from the fixed artifact layout, records the current compatibility
+     contract, includes optional JP-BERT files only when present, and validates
+     the result before publishing.
    - Hosted CI now has a dedicated `Test ONNX Runtime GGML EP` workflow. Push
      and pull request runs cover Python checks, default Plugin EP integration
      tests, native build, and native smoke registration. Manual dispatch and
@@ -325,9 +329,10 @@ logic back into AivisSpeech Engine.
      TTS.cpp, and fails before writing if any tensor that TTS.cpp will load is
      missing. It supports JP-BERT ONNX initializers and Hugging Face checkpoint
      directories (`model.safetensors` or `pytorch_model.bin`).
-   - Remaining production work: configure the pinned production artifact bundle
-     URL/SHA secrets in the repository environment and add additional artifact
-     bundle manifests for more ORT/TTS.cpp/GGUF schema versions.
+   - Remaining production work: publish the generated artifact bundle, configure
+     the pinned production artifact bundle URL/SHA secrets in the repository
+     environment, and add additional artifact bundle manifests for more
+     ORT/TTS.cpp/GGUF schema versions.
    - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
      TTS.cpp C API version, GGUF schema version, synthesis signature contract,
      and JP-BERT signature contract.

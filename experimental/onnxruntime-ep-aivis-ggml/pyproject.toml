@@ -26,6 +26,7 @@ aivis-ggml-onnx-ep-smoke-register = "onnxruntime_ep_aivis_ggml.cli:smoke_registe
 aivis-ggml-onnx-ep-validate-artifact-bundle = "onnxruntime_ep_aivis_ggml.cli:validate_artifact_bundle_main"
 aivis-ggml-onnx-ep-validate-cache = "onnxruntime_ep_aivis_ggml.cli:validate_cache_main"
 aivis-ggml-onnx-ep-validate-ep-context = "onnxruntime_ep_aivis_ggml.cli:validate_ep_context_payload_main"
+aivis-ggml-onnx-ep-write-artifact-bundle-manifest = "onnxruntime_ep_aivis_ggml.cli:write_artifact_bundle_manifest_main"
 
 [build-system]
 requires = ["hatchling"]

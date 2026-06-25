@@ -124,6 +124,9 @@ This directory currently provides:
   library/backend/device/thread/model tuple reuse one loaded TTS.cpp runtime
   instead of reloading the same synthesis and JP-BERT GGUF artifacts for every
   ONNX session.
+- A real-artifact bundle manifest writer. It generates
+  `aivis_ggml_ep_bundle.json` from the fixed hosted-bundle layout and validates
+  the result before scheduled CI consumes the bundle.
 
 The native EP reports `AivisGgmlExecutionProvider` to ONNX Runtime through the
 Plugin EP ABI. `GetCapability()` inspects ORT graphs for the known Aivis
@@ -251,10 +254,12 @@ manifests.
    package now also owns the JP-BERT GGUF writer for TTS.cpp's
    Style-Bert-VITS2 JP-BERT schema, so JP-BERT can be generated from the ONNX
    export plus adjacent `config.json`/tokenizer files, or from a Hugging Face
-   JP-BERT directory. A real-artifact JP-BERT parity fixture compares Plugin EP
-   `[tokens, 1024]` features against ONNX CPU. Remaining work is expanding the
-   hosted matrix across more ORT/TTS.cpp/GGUF schema versions and configuring
-   the production artifact bundle secrets.
+   JP-BERT directory. The bundle manifest writer generates the versioned
+   `aivis_ggml_ep_bundle.json` used by scheduled CI before the validator gates
+   it. A real-artifact JP-BERT parity fixture compares Plugin EP `[tokens,
+   1024]` features against ONNX CPU. Remaining work is expanding the hosted
+   matrix across more ORT/TTS.cpp/GGUF schema versions and configuring the
+   production artifact bundle secrets.
 
 ## Native Build
 
@@ -447,6 +452,18 @@ python tools/validate_artifact_bundle.py /path/to/bundle/root --require-manifest
 aivis-ggml-onnx-ep-validate-artifact-bundle /path/to/bundle/root --require-manifest
 ```
 
+Write the canonical bundle manifest before publishing a real-artifact bundle:
+
+```bash
+python tools/write_artifact_bundle_manifest.py /path/to/bundle/root --overwrite
+# or, after installing the package:
+aivis-ggml-onnx-ep-write-artifact-bundle-manifest /path/to/bundle/root --overwrite
+```
+
+The writer records the current provider/ORT/TTS.cpp/GGUF compatibility contract,
+adds optional JP-BERT artifacts only when their files are present, and then runs
+the same bundle validator. Its JSON report uses portable relative paths only.
+
 Run the opt-in real-artifact EPContext round-trip fixture:
 
 ```bash
@@ -526,7 +543,9 @@ jp_bert/tokenizer_config.json   # required when model.gguf must be generated
 ```
 
 The optional manifest is required on scheduled runs and may be omitted for
-manual legacy bundles. It records the real-artifact matrix without local paths:
+manual legacy bundles. Prefer generating it with
+`aivis-ggml-onnx-ep-write-artifact-bundle-manifest` instead of hand-editing
+JSON. It records the real-artifact matrix without local paths:
 
 ```json
 {
@@ -537,7 +556,7 @@ manual legacy bundles. It records the real-artifact matrix without local paths:
     "synthesis_onnx": "synthesis/model.aivmx",
     "synthesis_style_vectors": "synthesis/style_vectors.npy"
   },
-  "matrix_id": "ort-1.26.0-tts-abi1-gguf1",
+  "matrix_id": "ort-1.26.0-epapi26-provider0.1.0-tts-abi1-gguf1",
   "onnxruntime": {
     "plugin_ep_api_version": 26,
     "tested_runtime_version": "1.26.0"
