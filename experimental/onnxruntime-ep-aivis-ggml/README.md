@@ -240,10 +240,12 @@ manifests.
    also implements ORT's compiled-model compatibility callbacks: exact
    provider/runtime/signature/GGUF contract matches return optimal, ORT API
    version drift returns prefer-recompile, unrelated EP metadata is
-   not-applicable, and Aivis contract drift is unsupported. Remaining work is
-   moving these fixtures into a hosted artifact CI matrix and adding a
-   package-owned JP-BERT GGUF writer instead of requiring an external JP-BERT
-   GGUF input.
+   not-applicable, and Aivis contract drift is unsupported. The dedicated
+   GitHub Actions workflow covers public Plugin EP checks and can run the
+   real-artifact compiler/EPContext matrix on manual dispatch. Remaining work
+   is adding a package-owned JP-BERT GGUF writer instead of requiring an
+   external JP-BERT GGUF input, plus expanding the hosted matrix across more
+   ORT/TTS.cpp/GGUF schema versions.
 
 ## Native Build
 
@@ -414,3 +416,25 @@ AIVIS_GGML_ONNX_EP_SYNTHESIS_CONFIG_PATH=/path/to/config.json \
 AIVIS_GGML_ONNX_EP_STYLE_VECTORS_PATH=/path/to/style_vectors.npy \
 uv run --with gguf pytest test/integration/test_onnxruntime_ep_aivis_ggml.py::test_aivis_ggml_onnx_ep_prepare_cache_writes_real_synthesis_gguf -q
 ```
+
+The hosted workflow `.github/workflows/test-onnxruntime-ggml-ep.yml` runs the
+public Plugin EP checks on push and pull request. On manual dispatch it can also
+run the real-artifact compiler and EPContext matrix when given a bundle URL via
+the `artifact_bundle_url` input or `AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL`
+secret. The bundle must unpack to this portable layout:
+
+```text
+lib/libtts.so
+synthesis/model.aivmx
+synthesis/model.gguf
+synthesis/config.json
+synthesis/style_vectors.npy
+jp_bert/model.onnx       # optional; include with jp_bert/model.gguf
+jp_bert/model.gguf       # optional; include with jp_bert/model.onnx
+```
+
+The workflow builds the native Plugin EP against ONNX Runtime 1.26 headers,
+smoke-registers it, runs `compile_cache.py` with the synthesis files, and runs
+the EPContext round-trip fixture. The optional
+`artifact_bundle_sha256` input or
+`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` secret pins the downloaded bundle.

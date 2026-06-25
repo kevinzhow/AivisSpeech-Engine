@@ -294,9 +294,14 @@ logic back into AivisSpeech Engine.
      entry point for synthesis artifacts. It wraps tensor-pack extraction,
      strict initializer mapping, GGUF writing, ready-manifest validation, and
      `ep_compatibility_info` generation for ORT model-package metadata.
-   - Remaining production work: run that compiler in hosted CI with real
-     artifacts, add a package-owned JP-BERT GGUF writer, and expand the
-     real-artifact matrix across ORT/TTS.cpp/GGUF schema versions.
+   - Hosted CI now has a dedicated `Test ONNX Runtime GGML EP` workflow. Push
+     and pull request runs cover Python checks, default Plugin EP integration
+     tests, native build, and native smoke registration. Manual dispatch can
+     download a real-artifact bundle and run the synthesis compiler plus
+     EPContext round-trip matrix.
+   - Remaining production work: add a package-owned JP-BERT GGUF writer and
+     expand the hosted real-artifact matrix across ORT/TTS.cpp/GGUF schema
+     versions.
    - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
      TTS.cpp C API version, GGUF schema version, synthesis signature contract,
      and JP-BERT signature contract.
