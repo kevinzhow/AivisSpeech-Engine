@@ -180,6 +180,20 @@ def _replace_provider_options(
     return replaced
 
 
+def _remove_provider(
+    *,
+    providers: Sequence[str | tuple[str, dict[str, Any]]],
+    provider_name: str,
+) -> list[str | tuple[str, dict[str, Any]]]:
+    """Remove one configured provider while preserving fallback provider order."""
+
+    return [
+        provider
+        for provider in providers
+        if _onnx_provider_name(provider) != provider_name
+    ]
+
+
 class StyleBertVITS2TTSEngine(TTSEngine):
     """
     AivisSpeech Engine におけるテキスト音声合成エンジンの実装。
@@ -511,13 +525,25 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         config: OnnxPluginExecutionProviderConfig,
         jp_bert_gguf_cache: JpBertGgufCache | None,
     ) -> None:
-        """Prepare JP-BERT GGUF before style-bert-vits2 opens the BERT session."""
+        """Prepare BERT-only Plugin EP options before style-bert-vits2 opens BERT."""
 
         if config.provider_name not in _provider_names(self.onnx_providers):
             return
         if config.provider_options.get("claim_jp_bert_graph") != "1":
+            self.onnx_providers = _remove_provider(
+                providers=self.onnx_providers,
+                provider_name=config.provider_name,
+            )
             return
+        provider_options = dict(config.provider_options)
+        provider_options["claim_synthesis_graph"] = "0"
+        provider_options.pop("gguf_path", None)
         if config.provider_options.get("jp_bert_gguf_path"):
+            self.onnx_providers = _replace_provider_options(
+                providers=self.onnx_providers,
+                provider_name=config.provider_name,
+                provider_options=provider_options,
+            )
             return
         if jp_bert_gguf_cache is None:
             raise RuntimeError(
@@ -530,10 +556,11 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         config.provider_options["jp_bert_gguf_path"] = str(
             jp_bert_gguf_entry.gguf_path
         )
+        provider_options["jp_bert_gguf_path"] = str(jp_bert_gguf_entry.gguf_path)
         self.onnx_providers = _replace_provider_options(
             providers=self.onnx_providers,
             provider_name=config.provider_name,
-            provider_options=config.provider_options,
+            provider_options=provider_options,
         )
 
     def _resolve_jp_bert_onnx_path(self) -> Path:

@@ -245,9 +245,9 @@ Each preview is the `run00` AAC file for that backend and text. These
 previews are for qualitative listening only; the RTF table above comes from the
 no-audio runs. `--audio_output_dir` records each generated path in
 `records[].audio_path`, and AAC encoding runs outside the synthesis timer.
-The Ubuntu ONNX CPU and both Linux ggml/Vulkan previews below were refreshed
-after the 2026-06-25 ONNX-vs-GGML audio parity fix described in the next
-section.
+The Ubuntu ONNX CPU/CUDA and Linux ggml/Vulkan previews below were regenerated
+from the current Engine code on 2026-06-25 after the ONNX-vs-GGML audio parity
+fix and the ONNX Plugin EP AIVMX auto-GGUF path fix described below.
 
 | text length | ONNX CPU | ONNX CUDA | ggml Vulkan AMD 780M | ggml Vulkan RTX 3060 |
 | --- | --- | --- | --- | --- |
@@ -259,7 +259,10 @@ section.
 
 These previews exercise the `tts_backend=onnx` path with
 `AivisGgmlExecutionProvider` claiming both the synthesis graph and JP-BERT graph.
-They are separate from the native Aivis ggml backend previews above.
+They are separate from the native Aivis ggml backend previews above. The Linux
+Plugin EP previews below were regenerated on 2026-06-25 without passing explicit
+`--gguf_path` or `--jp_bert_gguf_path`, so they cover the calling-side-transparent
+AIVMX/ONNX synthesis GGUF cache plus prebuilt JP-BERT GGUF cache path.
 
 | text length | ONNX ggml Plugin EP AMD 780M | ONNX ggml Plugin EP RTX 3060 |
 | --- | --- | --- |
@@ -309,12 +312,12 @@ The refreshed RTX 3060 ggml/Vulkan preview validation used
 `45568`, `76288`, and `336384` samples for short, medium, and long text, with
 the same `0.999969482` peak.
 
-The repository preview files for Ubuntu ONNX CPU, AMD 780M ggml/Vulkan, and RTX
-3060 ggml/Vulkan in
+The repository preview files for Ubuntu ONNX CPU/CUDA, AMD 780M ggml/Vulkan,
+RTX 3060 ggml/Vulkan, and the Linux ONNX Plugin EP Vulkan runs in
 `docs/res/style-bert-vits2-benchmark-20260625/representative-audio/` were
-regenerated from the post-fix parity validation runs. AAC byte sizes are not an
-accuracy metric because encoder decisions and stochastic TTS content can differ
-even when sample counts and level normalization match.
+regenerated from the current post-fix validation runs. AAC byte sizes are not
+an accuracy metric because encoder decisions and stochastic TTS content can
+differ even when sample counts and level normalization match.
 
 ## Windows Intel Arc B580 Native Binding Result
 

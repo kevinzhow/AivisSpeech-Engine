@@ -646,15 +646,50 @@ def test_prepare_onnx_plugin_jp_bert_provider_options_fills_cache_path(
     )
 
     assert config.provider_options["jp_bert_gguf_path"] == str(jp_bert_gguf_path)
+    assert config.provider_options["claim_synthesis_graph"] == "1"
     assert engine.onnx_providers[0] == (
         "AivisGgmlExecutionProvider",
         {
             "backend": "vulkan",
             "claim_jp_bert_graph": "1",
-            "claim_synthesis_graph": "1",
+            "claim_synthesis_graph": "0",
             "jp_bert_gguf_path": str(jp_bert_gguf_path),
         },
     )
+
+
+def test_prepare_onnx_plugin_jp_bert_provider_options_removes_synthesis_only_ep() -> None:
+    """The global BERT ONNX session must not receive synthesis-only EP options."""
+
+    engine = cast(StyleBertVITS2TTSEngine, object.__new__(StyleBertVITS2TTSEngine))
+    engine.onnx_providers = [
+        (
+            "AivisGgmlExecutionProvider",
+            {
+                "backend": "vulkan",
+                "claim_jp_bert_graph": "0",
+                "claim_synthesis_graph": "1",
+            },
+        ),
+        "CPUExecutionProvider",
+    ]
+    config = OnnxPluginExecutionProviderConfig(
+        provider_name="AivisGgmlExecutionProvider",
+        provider_options={
+            "backend": "vulkan",
+            "claim_jp_bert_graph": "0",
+            "claim_synthesis_graph": "1",
+        },
+        strict=True,
+    )
+
+    engine._prepare_onnx_plugin_jp_bert_provider_options(  # noqa: SLF001
+        config=config,
+        jp_bert_gguf_cache=None,
+    )
+
+    assert engine.onnx_providers == ["CPUExecutionProvider"]
+    assert config.provider_options["claim_synthesis_graph"] == "1"
 
 
 def test_normalize_style_bert_vits2_pcm16_matches_peak_normalization() -> None:
