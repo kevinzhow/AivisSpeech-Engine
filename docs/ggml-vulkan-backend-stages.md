@@ -440,6 +440,22 @@ Known remaining work before calling the whole staged plan complete:
 | Stage 5 | real end-to-end RTF improvement with device evidence, active bottleneck attribution, no silent CPU fallback | engine telemetry, benchmark harness, Vulkan log gates, payload/timing summary fields, native-binding transport, local AMD 780M benchmark evidence | Partial. Native binding removes HTTP/base64/WAV transport overhead; fully fused TTS.cpp text/frontend routing and broader device matrices remain open. |
 
 - Completion boundary: this repository now has a functional opt-in ggml/Vulkan backend through a managed TTS.cpp sidecar or experimental native binding, automatic AIVM/Safetensors-to-GGUF cache conversion, deterministic parity gates, diagnostics, and benchmark tooling. The whole staged plan is not complete until Stage 5's open performance work is closed: a fused TTS.cpp text/frontend route that keeps tokenization, JP-BERT, and synthesis tensors inside TTS.cpp, plus broader device/performance validation and final parity conclusions for fast mode and non-zero SDP.
+- The separate ONNX Runtime Plugin EP route now has opt-in real-artifact
+  fixtures for ORT `ModelCompiler` EPContext round trips and strict synthesis
+  ONNX-to-GGUF writing:
+
+```bash
+uv run pytest test/integration/test_onnxruntime_ep_aivis_ggml.py -q
+# default result: skipped unless AIVIS_GGML_ONNX_EP_TEST=1 or
+# AIVIS_GGML_ONNX_EP_CONVERT_TEST=1 is set
+```
+
+When enabled, the EPContext fixture compiles synthesis and optional JP-BERT
+ONNX graphs into both external-payload and embedded-payload EPContext models,
+validates the generated Aivis GGML payloads, and loads the precompiled models
+without passing `gguf_path` or `jp_bert_gguf_path`. That proves ORT
+`ModelCompiler` compatibility and payload-driven lazy restore, while keeping the
+deployment-specific `tts_cpp_library_path` outside the portable payload.
 - A strict managed-sidecar smoke test has been proven locally with the `まお` AIVMX/AIVM pair and a preconverted `mao-full-sdp.gguf`: the engine produced a float32 waveform and the sidecar log showed `POST /v1/style-bert-vits2/synthesize-front 200` on `AMD Radeon 780M Graphics (RADV PHOENIX)`.
 - That smoke test is now captured as an opt-in pytest integration test:
 
@@ -448,7 +464,7 @@ uv run --group dev pytest test/integration/test_style_bert_vits2_ggml_vulkan.py 
 # default result: skipped unless AIVIS_GGML_VULKAN_TEST=1 is set
 ```
 
-When enabled, the integration test now runs both ONNX and ggml/Vulkan for a small deterministic AivisSpeech golden suite. It defaults to `tempoDynamicsScale=0`. Non-zero SDP probes must set both `AIVIS_GGML_TEST_TEMPO_DYNAMICS_SCALE=1.0` and `AIVIS_GGML_TEST_ALLOW_NONZERO_SDP=1`. Precision matrix probes can set `AIVIS_GGML_TEST_VULKAN_PRECISIONS=accurate,fast`; by default only `accurate` is a hard parity gate, while `fast` is diagnostic unless `AIVIS_GGML_TEST_REQUIRED_PRECISIONS=accurate,fast` is set. Frontend matrix probes can set `AIVIS_GGML_TEST_FRONTENDS=onnx-bert,tts-cpp-jp-bert`; the TTS.cpp JP-BERT mode requires `AIVIS_GGML_TEST_JP_BERT_GGUF_PATH=/path/to/style-bert-vits2-jp-bert.gguf` and asserts that `/v1/style-bert-vits2/jp-bert/features` was served. Synthesis endpoint probes can set `AIVIS_GGML_TEST_SYNTHESIS_ENDPOINTS=synthesize-front,synthesize-symbols`; the log gate checks the exact endpoint route that was selected. The test can write a parity report with `AIVIS_GGML_TEST_PARITY_REPORT_PATH=/tmp/report.json`. The test asserts:
+When enabled, the integration test now runs both ONNX and ggml/Vulkan for a small deterministic AivisSpeech golden suite. It defaults to `tempoDynamicsScale=0`. Non-zero SDP probes must set both `AIVIS_GGML_TEST_TEMPO_DYNAMICS_SCALE=1.0` and `AIVIS_GGML_TEST_ALLOW_NONZERO_SDP=1`. Precision matrix probes can set `AIVIS_GGML_TEST_VULKAN_PRECISIONS=accurate,fast`; by default only `accurate` is a hard parity gate, while `fast` is diagnostic unless `AIVIS_GGML_TEST_REQUIRED_PRECISIONS=accurate,fast` is set. Frontend matrix probes can set `AIVIS_GGML_TEST_FRONTENDS=onnx-bert,tts-cpp-jp-bert`; the TTS.cpp JP-BERT mode requires `AIVIS_GGML_TEST_JP_BERT_GGUF_PATH=/path/to/style-bert-vits2-jp-bert.gguf` and asserts that `/v1/style-bert-vits2/jp-bert/features` was served. Synthesis endpoint probes can set `AIVIS_GGML_TEST_SYNTHESIS_ENDPOINTS=synthesize-front,synthesize-symbols`; the log gate checks the exact endpoint route that was selected. The test can write a parity report with `AIVIS_GGML_TEST_PARITY_REPORT_PATH=<path-to-parity-report.json>`. The test asserts:
 
 - non-empty float32 output from both backends.
 - matching total duration within 50 ms.

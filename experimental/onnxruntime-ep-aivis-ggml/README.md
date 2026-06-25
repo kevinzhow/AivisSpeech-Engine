@@ -105,6 +105,8 @@ This directory currently provides:
   payload contract, graph kind, provider/runtime versions, backend options,
   portable GGUF/cache artifact paths, and rejects deployment-specific
   `tts_cpp_library_path` leakage.
+- Opt-in real-artifact integration fixtures for ORT `ModelCompiler` EPContext
+  round trips and strict synthesis ONNX-to-GGUF writing.
 - A deployment compatibility matrix in every manifest. It records the provider
   version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API contract,
   GGUF schema expectation, signature contract versions, and official
@@ -212,15 +214,22 @@ manifests.
    artifact paths from the payload, lazy-loads TTS.cpp through the provided
    `tts_cpp_library_path`, and routes compute through the same synthesis/JP-BERT
    bridge. The generated payload contract is also machine-checkable through
-   `validate_ep_context_payload.py`.
+   `validate_ep_context_payload.py`. `Compile()` returns both the ORT-required
+   `OrtNodeComputeInfo` and a fused-node-name-matched `EPContext` node, which is
+   required by ORT `ModelCompiler` in ONNX Runtime 1.26.
 5. Offline compiler lifecycle: partially implemented. The cache manifest
    validator now provides a deployment gate for manifest/runtime/signature and
    portable artifact layout compatibility, while the EPContext payload validator
-   gates generated ORT context artifacts. The manifest also records an explicit
+   gates generated ORT context artifacts. Opt-in integration tests now compile
+   real synthesis and JP-BERT graphs into external and embedded EPContext
+   models, then load those precompiled models through payload-driven lazy
+   restore. A second opt-in fixture writes a real synthesis GGUF with
+   `prepare_cache --write-gguf`. The manifest also records an explicit
    compatibility matrix covering ORT Plugin EP API version, TTS.cpp C API
    contract, GGUF schema expectation, model signature contracts, EPContext
-   support level, and EPContext payload version. The remaining work is broader
-   real-model CI fixtures for GGUF generation and EPContext round trips.
+   support level, and EPContext payload version. Remaining work is moving these
+   fixtures into a hosted artifact CI matrix and adding a package-owned JP-BERT
+   GGUF writer instead of requiring an external JP-BERT GGUF input.
 
 ## Native Build
 
@@ -342,4 +351,27 @@ context model:
 python tools/validate_ep_context_payload.py /path/to/context/model_aivis_ggml_synthesis_0.json --graph-kind synthesis
 # or, after installing the package:
 aivis-ggml-onnx-ep-validate-ep-context /path/to/context/model_aivis_ggml_synthesis_0.json --graph-kind synthesis
+```
+
+Run the opt-in real-artifact EPContext round-trip fixture:
+
+```bash
+AIVIS_GGML_ONNX_EP_TEST=1 \
+AIVIS_GGML_ONNX_EP_LIBRARY_PATH=/path/to/libaivis_ggml_onnx_ep.so \
+AIVIS_GGML_ONNX_EP_TTS_CPP_LIBRARY_PATH=/path/to/libtts.so \
+AIVIS_GGML_ONNX_EP_SYNTHESIS_ONNX_PATH=/path/to/model.aivmx \
+AIVIS_GGML_ONNX_EP_SYNTHESIS_GGUF_PATH=/path/to/model.gguf \
+AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH=/path/to/jp-bert.onnx \
+AIVIS_GGML_ONNX_EP_JP_BERT_GGUF_PATH=/path/to/style-bert-vits2-jp-bert.gguf \
+uv run pytest test/integration/test_onnxruntime_ep_aivis_ggml.py::test_aivis_ggml_onnx_ep_compiles_and_loads_ep_context_round_trip -q
+```
+
+Run the opt-in real synthesis ONNX-to-GGUF writer fixture:
+
+```bash
+AIVIS_GGML_ONNX_EP_CONVERT_TEST=1 \
+AIVIS_GGML_ONNX_EP_SYNTHESIS_ONNX_PATH=/path/to/model.aivmx \
+AIVIS_GGML_ONNX_EP_SYNTHESIS_CONFIG_PATH=/path/to/config.json \
+AIVIS_GGML_ONNX_EP_STYLE_VECTORS_PATH=/path/to/style_vectors.npy \
+uv run --with gguf pytest test/integration/test_onnxruntime_ep_aivis_ggml.py::test_aivis_ggml_onnx_ep_prepare_cache_writes_real_synthesis_gguf -q
 ```

@@ -261,6 +261,11 @@ logic back into AivisSpeech Engine.
      deployment: version/provider/runtime contracts, graph kind, backend
      options, portable artifact paths, and absence of deployment-specific TTS.cpp
      library paths.
+   - ORT 1.26 `ModelCompiler` still requires `Compile()` to return a valid
+     `OrtNodeComputeInfo` for each graph even when EPContext generation is
+     enabled. The generated EPContext node must also use the exact fused node
+     name supplied by ORT; ORT replaces fused nodes by name when building the
+     compiled model.
 
 5. Offline compiler lifecycle and compatibility matrix.
    - Status: partially implemented.
@@ -269,13 +274,20 @@ logic back into AivisSpeech Engine.
      status, and portable relative artifact paths before deployment.
    - An official EPContext payload validator now gates generated ORT context
      artifacts separately from cache manifests.
+   - Opt-in real-artifact fixtures now cover ORT `ModelCompiler` EPContext
+     round trips for synthesis and JP-BERT graphs, in both external payload and
+     embedded payload modes. The precompiled models are loaded without passing
+     `gguf_path` or `jp_bert_gguf_path`, proving payload-driven lazy restore.
+   - A second opt-in fixture covers strict synthesis ONNX-to-GGUF writing with
+     `prepare_cache --write-gguf` and validates the resulting ready manifest.
    - Every cache manifest records an explicit compatibility matrix: provider
      version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API
      contract, GGUF schema expectation, synthesis/JP-BERT signature contracts,
      EPContext support level, and EPContext payload version.
-   - Promote `prepare_cache --write-gguf` from a local helper to a versioned
-     offline compiler command with real-model fixture tests for synthesis GGUF
-     output, JP-BERT GGUF output, and EPContext round trips.
+   - Remaining production work: promote `prepare_cache --write-gguf` from a
+     local helper to a versioned offline compiler command in hosted CI, add a
+     package-owned JP-BERT GGUF writer, and expand the real-artifact matrix
+     across ORT/TTS.cpp/GGUF schema versions.
    - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
      TTS.cpp C API version, GGUF schema version, synthesis signature contract,
      and JP-BERT signature contract.

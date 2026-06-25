@@ -1300,6 +1300,7 @@ OrtStatus* CreateEpContextNode(
     const OrtApi& api,
     const AivisGgmlEpConfig& config,
     const OrtGraph* ort_graph,
+    const OrtNode* fused_node,
     AivisGgmlGraphKind graph_kind,
     size_t graph_index,
     OrtNode** ep_context_node) noexcept {
@@ -1320,11 +1321,23 @@ OrtStatus* CreateEpContextNode(
     Ort::ConstGraph graph{ort_graph};
     std::vector<std::string> input_names;
     std::vector<std::string> output_names;
-    for (const Ort::ConstValueInfo& input : graph.GetInputs()) {
-      input_names.push_back(input.GetName());
-    }
-    for (const Ort::ConstValueInfo& output : graph.GetOutputs()) {
-      output_names.push_back(output.GetName());
+    std::string ep_context_node_name;
+    if (fused_node != nullptr) {
+      Ort::ConstNode fused{fused_node};
+      ep_context_node_name = fused.GetName();
+      for (const Ort::ConstValueInfo& input : fused.GetInputs()) {
+        input_names.push_back(input.GetName());
+      }
+      for (const Ort::ConstValueInfo& output : fused.GetOutputs()) {
+        output_names.push_back(output.GetName());
+      }
+    } else {
+      for (const Ort::ConstValueInfo& input : graph.GetInputs()) {
+        input_names.push_back(input.GetName());
+      }
+      for (const Ort::ConstValueInfo& output : graph.GetOutputs()) {
+        output_names.push_back(output.GetName());
+      }
     }
 
     std::vector<const char*> input_name_ptrs;
@@ -1345,13 +1358,16 @@ OrtStatus* CreateEpContextNode(
         config.ort_ep_context_embed_mode
             ? payload
             : WriteEpContextPayloadFile(config, graph_kind, graph_index, payload);
-    const std::string prefix =
-        config.ort_ep_context_node_name_prefix.empty()
-            ? std::string(kEpName)
-            : config.ort_ep_context_node_name_prefix;
-    std::ostringstream node_name;
-    node_name << prefix << "_" << GraphKindName(graph_kind)
-              << "_ep_context_" << graph_index;
+    if (ep_context_node_name.empty()) {
+      const std::string prefix =
+          config.ort_ep_context_node_name_prefix.empty()
+              ? std::string(kEpName)
+              : config.ort_ep_context_node_name_prefix;
+      std::ostringstream fallback_name;
+      fallback_name << prefix << "_" << GraphKindName(graph_kind)
+                    << "_ep_context_" << graph_index;
+      ep_context_node_name = fallback_name.str();
+    }
     const std::string partition_name =
         std::string(GraphKindName(graph_kind)) + "_" + std::to_string(graph_index);
     const std::string hardware_architecture =
@@ -1391,7 +1407,7 @@ OrtStatus* CreateEpContextNode(
     status = model_editor_api->CreateNode(
         "EPContext",
         "com.microsoft",
-        node_name.str().c_str(),
+        ep_context_node_name.c_str(),
         input_name_ptrs.data(),
         input_name_ptrs.size(),
         output_name_ptrs.data(),
@@ -2780,6 +2796,7 @@ struct AivisGgmlEp final : OrtEp {
               ep->ort_api_,
               ep->config_,
               graphs[i],
+              fused_nodes != nullptr ? fused_nodes[i] : nullptr,
               graph_kind,
               i,
               &ep_context_nodes[i]);
@@ -2798,6 +2815,12 @@ struct AivisGgmlEp final : OrtEp {
               std::string("created EPContext node graph_kind=") +
               GraphKindName(graph_kind) +
               " index=" + std::to_string(i));
+          node_compute_infos[i] = new AivisGgmlNodeComputeInfo(
+              ep->ort_api_,
+              runtime_for_graph,
+              graph_kind,
+              std::move(input_indices),
+              primary_output_index);
           continue;
         }
         node_compute_infos[i] = new AivisGgmlNodeComputeInfo(
