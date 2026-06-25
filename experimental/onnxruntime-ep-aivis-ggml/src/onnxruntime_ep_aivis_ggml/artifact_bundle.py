@@ -12,10 +12,10 @@ from onnxruntime_ep_aivis_ggml.cache import (
     ORT_PLUGIN_EP_API_VERSION,
     PROVIDER_NAME,
     PROVIDER_VERSION,
+    TESTED_ORT_RUNTIME_VERSION,
 )
 
 REAL_ARTIFACT_BUNDLE_VERSION = "aivis-ggml-real-artifact-bundle-v1"
-TESTED_ORT_RUNTIME_VERSION = "1.26.0"
 REAL_ARTIFACT_BUNDLE_MANIFEST_NAME = "aivis_ggml_ep_bundle.json"
 
 REQUIRED_ARTIFACTS = {

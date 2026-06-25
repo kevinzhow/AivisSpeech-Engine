@@ -1,5 +1,6 @@
 """Tests for Aivis GGML ONNX Plugin EP cache manifest planning."""
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -205,6 +206,57 @@ def test_validate_cache_manifest_checks_contracts_and_portable_artifacts(
     assert set(cache.validate_cache_manifest(manifest_with_absolute_artifact)) == {
         "artifact_path_not_portable:gguf",
         "artifact_path_not_portable:debug",
+    }
+
+
+def test_validate_cache_manifest_rejects_compatibility_matrix_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Deployment manifests must gate every versioned compatibility contract."""
+
+    signature = _supported_signature(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cache
+    from onnxruntime_ep_aivis_ggml.signature import SignatureMatch
+
+    model_path = tmp_path / "model.aivmx"
+    model_path.write_bytes(b"fake onnx bytes")
+    monkeypatch.setattr(cache, "load_onnx_graph_signature", lambda _path: signature)
+    monkeypatch.setattr(
+        cache,
+        "match_supported_style_bert_vits2_synthesis",
+        lambda _signature: SignatureMatch(supported=True, reasons=()),
+    )
+
+    plan = cache.prepare_ggml_cache(
+        model_path=model_path,
+        cache_dir=tmp_path / "cache",
+        backend="vulkan",
+        precision="accurate",
+    )
+
+    manifest = copy.deepcopy(plan.manifest)
+    matrix = manifest["compatibility_matrix"]
+    matrix["provider"]["version"] = "0.2.0"
+    matrix["onnxruntime"]["plugin_ep_api_version"] = 27
+    matrix["runtime_contract"]["expected_optional_versions"]["runtime_abi"] = 2
+    matrix["runtime_contract"]["expected_optional_versions"]["gguf_schema"] = 2
+    matrix["model_signature_contracts"]["jp_bert"] = "drifted-signature"
+    matrix["ep_context"]["official_payload_version"] = "drifted-ep-context"
+    matrix["compiled_model_compatibility"]["ort_api_mismatch"] = "unsupported"
+    manifest["provider_options"]["backend"] = "dml"
+    manifest["provider_options"]["precision"] = "fp16"
+
+    assert set(cache.validate_cache_manifest(manifest)) == {
+        "compatibility_matrix_compiled_model_ort_api_policy_mismatch",
+        "compatibility_matrix_ep_context_payload_version_mismatch",
+        "compatibility_matrix_jp_bert_signature_contract_mismatch",
+        "compatibility_matrix_ort_api_version_mismatch",
+        "compatibility_matrix_provider_version_mismatch",
+        "compatibility_matrix_tts_cpp_gguf_schema_mismatch",
+        "compatibility_matrix_tts_cpp_runtime_abi_mismatch",
+        "provider_options_backend_invalid",
+        "provider_options_precision_invalid",
     }
 
 

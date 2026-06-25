@@ -43,6 +43,7 @@ SIGNATURE_CONTRACT_VERSION = "aivis-ggml-signature-contract-v1"
 PROVIDER_NAME = "AivisGgmlExecutionProvider"
 PROVIDER_VERSION = "0.1.0"
 DEFAULT_CONVERTER_VERSION = PROVIDER_VERSION
+TESTED_ORT_RUNTIME_VERSION = "1.26.0"
 ORT_PLUGIN_EP_API_VERSION = 26
 EXPECTED_TTS_CPP_RUNTIME_ABI_VERSION = 1
 EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION = 1
@@ -363,7 +364,7 @@ def build_compatibility_matrix() -> dict[str, Any]:
             "version": PROVIDER_VERSION,
         },
         "onnxruntime": {
-            "tested_runtime_version": "1.26.0",
+            "tested_runtime_version": TESTED_ORT_RUNTIME_VERSION,
             "plugin_ep_api_version": ORT_PLUGIN_EP_API_VERSION,
             "requires_model_editor_api": True,
         },
@@ -719,14 +720,16 @@ def validate_cache_manifest(
     if not isinstance(compatibility_matrix, dict):
         errors.append("compatibility_matrix_missing")
     else:
-        if compatibility_matrix.get("version") != COMPATIBILITY_MATRIX_VERSION:
-            errors.append("compatibility_matrix_version_mismatch")
-        provider = compatibility_matrix.get("provider")
-        if not isinstance(provider, dict) or provider.get("name") != PROVIDER_NAME:
-            errors.append("compatibility_matrix_provider_mismatch")
-        runtime_contract = compatibility_matrix.get("runtime_contract")
-        if not isinstance(runtime_contract, dict):
-            errors.append("compatibility_matrix_runtime_contract_missing")
+        _validate_compatibility_matrix(errors, compatibility_matrix)
+
+    provider_options = manifest.get("provider_options")
+    if not isinstance(provider_options, dict):
+        errors.append("provider_options_missing")
+    else:
+        if provider_options.get("backend") not in SUPPORTED_BACKENDS:
+            errors.append("provider_options_backend_invalid")
+        if provider_options.get("precision") not in SUPPORTED_PRECISIONS:
+            errors.append("provider_options_precision_invalid")
 
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
@@ -778,6 +781,217 @@ def _validate_expected_string(
 ) -> None:
     if payload.get(key) != expected:
         errors.append(error)
+
+
+def _validate_expected_int(
+    errors: list[str],
+    payload: dict[str, Any],
+    key: str,
+    expected: int,
+    error: str,
+) -> None:
+    if payload.get(key) != expected:
+        errors.append(error)
+
+
+def _validate_expected_bool(
+    errors: list[str],
+    payload: dict[str, Any],
+    key: str,
+    expected: bool,
+    error: str,
+) -> None:
+    if payload.get(key) is not expected:
+        errors.append(error)
+
+
+def _validate_compatibility_matrix(
+    errors: list[str],
+    compatibility_matrix: dict[str, Any],
+) -> None:
+    _validate_expected_string(
+        errors,
+        compatibility_matrix,
+        "version",
+        COMPATIBILITY_MATRIX_VERSION,
+        "compatibility_matrix_version_mismatch",
+    )
+
+    provider = compatibility_matrix.get("provider")
+    if not isinstance(provider, dict):
+        errors.append("compatibility_matrix_provider_missing")
+    else:
+        _validate_expected_string(
+            errors,
+            provider,
+            "name",
+            PROVIDER_NAME,
+            "compatibility_matrix_provider_name_mismatch",
+        )
+        _validate_expected_string(
+            errors,
+            provider,
+            "version",
+            PROVIDER_VERSION,
+            "compatibility_matrix_provider_version_mismatch",
+        )
+
+    onnxruntime = compatibility_matrix.get("onnxruntime")
+    if not isinstance(onnxruntime, dict):
+        errors.append("compatibility_matrix_onnxruntime_missing")
+    else:
+        _validate_expected_string(
+            errors,
+            onnxruntime,
+            "tested_runtime_version",
+            TESTED_ORT_RUNTIME_VERSION,
+            "compatibility_matrix_ort_runtime_version_mismatch",
+        )
+        _validate_expected_int(
+            errors,
+            onnxruntime,
+            "plugin_ep_api_version",
+            ORT_PLUGIN_EP_API_VERSION,
+            "compatibility_matrix_ort_api_version_mismatch",
+        )
+        _validate_expected_bool(
+            errors,
+            onnxruntime,
+            "requires_model_editor_api",
+            True,
+            "compatibility_matrix_ort_model_editor_requirement_mismatch",
+        )
+
+    runtime_contract = compatibility_matrix.get("runtime_contract")
+    if not isinstance(runtime_contract, dict):
+        errors.append("compatibility_matrix_runtime_contract_missing")
+    else:
+        _validate_expected_string(
+            errors,
+            runtime_contract,
+            "registry",
+            RUNTIME_REGISTRY_CONTRACT,
+            "compatibility_matrix_runtime_registry_mismatch",
+        )
+        _validate_expected_string(
+            errors,
+            runtime_contract,
+            "tts_cpp_c_api",
+            TTS_CPP_RUNTIME_CONTRACT,
+            "compatibility_matrix_tts_cpp_c_api_mismatch",
+        )
+        expected_versions = runtime_contract.get("expected_optional_versions")
+        if not isinstance(expected_versions, dict):
+            errors.append("compatibility_matrix_tts_cpp_versions_missing")
+        else:
+            _validate_expected_int(
+                errors,
+                expected_versions,
+                "runtime_abi",
+                EXPECTED_TTS_CPP_RUNTIME_ABI_VERSION,
+                "compatibility_matrix_tts_cpp_runtime_abi_mismatch",
+            )
+            _validate_expected_int(
+                errors,
+                expected_versions,
+                "gguf_schema",
+                EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION,
+                "compatibility_matrix_tts_cpp_gguf_schema_mismatch",
+            )
+
+    signature_contracts = compatibility_matrix.get("model_signature_contracts")
+    if not isinstance(signature_contracts, dict):
+        errors.append("compatibility_matrix_signature_contracts_missing")
+    else:
+        _validate_expected_string(
+            errors,
+            signature_contracts,
+            "synthesis",
+            SIGNATURE_CONTRACT_VERSION,
+            "compatibility_matrix_synthesis_signature_contract_mismatch",
+        )
+        _validate_expected_string(
+            errors,
+            signature_contracts,
+            "jp_bert",
+            SIGNATURE_CONTRACT_VERSION,
+            "compatibility_matrix_jp_bert_signature_contract_mismatch",
+        )
+
+    ep_context = compatibility_matrix.get("ep_context")
+    if not isinstance(ep_context, dict):
+        errors.append("compatibility_matrix_ep_context_missing")
+    else:
+        _validate_expected_string(
+            errors,
+            ep_context,
+            "lite_manifest",
+            EP_CONTEXT_LITE_VERSION,
+            "compatibility_matrix_ep_context_lite_mismatch",
+        )
+        _validate_expected_string(
+            errors,
+            ep_context,
+            "official_node_generation",
+            "supported",
+            "compatibility_matrix_ep_context_generation_mismatch",
+        )
+        _validate_expected_string(
+            errors,
+            ep_context,
+            "official_node_inference",
+            "lazy_artifact_restore_tts_library_required",
+            "compatibility_matrix_ep_context_inference_mismatch",
+        )
+        _validate_expected_string(
+            errors,
+            ep_context,
+            "official_payload_version",
+            OFFICIAL_EP_CONTEXT_VERSION,
+            "compatibility_matrix_ep_context_payload_version_mismatch",
+        )
+        _validate_expected_string(
+            errors,
+            ep_context,
+            "official_payload_validator",
+            "supported",
+            "compatibility_matrix_ep_context_payload_validator_mismatch",
+        )
+
+    compiled_model_compatibility = compatibility_matrix.get(
+        "compiled_model_compatibility"
+    )
+    if not isinstance(compiled_model_compatibility, dict):
+        errors.append("compatibility_matrix_compiled_model_compatibility_missing")
+    else:
+        _validate_expected_string(
+            errors,
+            compiled_model_compatibility,
+            "version",
+            COMPILED_MODEL_COMPATIBILITY_VERSION,
+            "compatibility_matrix_compiled_model_compatibility_version_mismatch",
+        )
+        _validate_expected_string(
+            errors,
+            compiled_model_compatibility,
+            "native_factory_validation",
+            "supported",
+            "compatibility_matrix_compiled_model_native_validation_mismatch",
+        )
+        _validate_expected_bool(
+            errors,
+            compiled_model_compatibility,
+            "optimal_requires_exact_contract",
+            True,
+            "compatibility_matrix_compiled_model_exact_contract_mismatch",
+        )
+        _validate_expected_string(
+            errors,
+            compiled_model_compatibility,
+            "ort_api_mismatch",
+            "prefer_recompilation",
+            "compatibility_matrix_compiled_model_ort_api_policy_mismatch",
+        )
 
 
 def _contains_key(value: Any, key: str) -> bool:

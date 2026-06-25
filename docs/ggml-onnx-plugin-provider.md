@@ -273,7 +273,8 @@ logic back into AivisSpeech Engine.
    - Status: partially implemented.
    - A cache manifest validator now checks manifest version,
      signature/runtime contracts, EPContext-lite metadata, optional ready
-     status, and portable relative artifact paths before deployment.
+     status, the complete compatibility matrix, provider backend/precision,
+     and portable relative artifact paths before deployment.
    - An official EPContext payload validator now gates generated ORT context
      artifacts separately from cache manifests.
    - Opt-in real-artifact fixtures now cover ORT `ModelCompiler` EPContext
@@ -286,7 +287,8 @@ logic back into AivisSpeech Engine.
      version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API
      contract, GGUF schema expectation, synthesis/JP-BERT signature contracts,
      EPContext support level, EPContext payload version, and compiled-model
-     compatibility contract.
+     compatibility contract. The validator rejects drift in those fields rather
+     than treating the matrix as informational metadata.
    - The native Plugin EP now implements ORT compiled-model compatibility:
      `GetCompiledModelCompatibilityInfo()` emits the provider/runtime/signature
      contract as portable JSON for `ep_compatibility_info`, and

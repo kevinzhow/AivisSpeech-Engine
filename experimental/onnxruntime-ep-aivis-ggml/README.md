@@ -224,8 +224,12 @@ manifests.
    required by ORT `ModelCompiler` in ONNX Runtime 1.26.
 5. Offline compiler lifecycle: partially implemented. The cache manifest
    validator now provides a deployment gate for manifest/runtime/signature and
-   portable artifact layout compatibility, while the EPContext payload validator
-   gates generated ORT context artifacts. Opt-in integration tests now compile
+   portable artifact layout compatibility, and rejects compatibility-matrix
+   drift across provider version, ORT Plugin EP API version, TTS.cpp ABI/GGUF
+   schema, synthesis/JP-BERT signature contracts, official EPContext payload
+   version, compiled-model compatibility policy, backend, and precision. The
+   EPContext payload validator gates generated ORT context artifacts. Opt-in
+   integration tests now compile
    real synthesis and JP-BERT graphs into external and embedded EPContext
    models, then load those precompiled models through payload-driven lazy
    restore. A second opt-in fixture writes a real synthesis GGUF with
@@ -420,6 +424,11 @@ python tools/validate_cache_manifest.py /path/to/cache/<key>/manifest.json --req
 # or, after installing the package:
 aivis-ggml-onnx-ep-validate-cache /path/to/cache/<key>/manifest.json --require-ready
 ```
+
+This validator is the offline deployment gate for the generated GGUF cache. It
+checks the cache manifest version, readiness when requested, runtime contract,
+signature contract, full compatibility matrix, provider backend/precision, and
+portable artifact paths before the native EP is allowed to claim the graph.
 
 Validate an official ORT EPContext payload before shipping a precompiled
 context model:
