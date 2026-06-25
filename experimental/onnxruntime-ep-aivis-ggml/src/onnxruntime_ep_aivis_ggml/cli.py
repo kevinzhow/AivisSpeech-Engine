@@ -222,6 +222,83 @@ def prepare_cache_main() -> None:
     print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def compile_cache_main() -> None:
+    """Run the versioned offline synthesis ONNX-to-GGUF compiler."""
+
+    from onnxruntime_ep_aivis_ggml.cache import (
+        DEFAULT_CONVERTER_VERSION,
+        build_compiled_model_compatibility_info,
+        prepare_ggml_cache,
+        validate_cache_manifest,
+    )
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model_path", type=Path)
+    parser.add_argument("--cache-dir", required=True, type=Path)
+    parser.add_argument(
+        "--config-path",
+        required=True,
+        type=Path,
+        help="Style-Bert-VITS2 config.json used for TTS.cpp GGUF metadata.",
+    )
+    parser.add_argument(
+        "--style-vectors-path",
+        required=True,
+        type=Path,
+        help="Style-Bert-VITS2 style_vectors.npy used when ONNX lacks style vectors.",
+    )
+    parser.add_argument("--backend", default="vulkan", choices=("vulkan", "metal", "cpu"))
+    parser.add_argument("--precision", default="accurate", choices=("accurate", "fast"))
+    parser.add_argument(
+        "--device",
+        default="",
+        help="Deployment device selector recorded in compatibility metadata.",
+    )
+    parser.add_argument(
+        "--converter-version",
+        default=DEFAULT_CONVERTER_VERSION,
+        help="Versioned compiler implementation included in the cache key.",
+    )
+    parser.add_argument(
+        "--allow-unsupported",
+        action="store_true",
+        help="Write a diagnostic manifest even when the graph signature is unsupported.",
+    )
+    args = parser.parse_args()
+
+    plan = prepare_ggml_cache(
+        model_path=args.model_path,
+        cache_dir=args.cache_dir,
+        config_path=args.config_path,
+        style_vectors_path=args.style_vectors_path,
+        backend=args.backend,
+        precision=args.precision,
+        converter_version=args.converter_version,
+        allow_unsupported=args.allow_unsupported,
+        write_tensor_pack=True,
+        write_gguf=True,
+        fail_on_unsupported_mapping=True,
+    )
+    errors = validate_cache_manifest(plan.manifest, require_ready=True)
+    compatibility_info = build_compiled_model_compatibility_info(
+        graph_kind="synthesis",
+        backend=args.backend,
+        device=args.device,
+        precision=args.precision,
+    )
+    result = {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "manifest_path": str(plan.manifest_path),
+        "gguf_path": str(plan.gguf_path),
+        "cache_key": plan.cache_key,
+        "compiled_model_compatibility_info": compatibility_info,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    if errors:
+        raise SystemExit(1)
+
+
 def validate_cache_main() -> None:
     """Validate a prepared GGML cache manifest before provider deployment."""
 

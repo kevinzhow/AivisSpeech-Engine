@@ -14,6 +14,7 @@ convert = [
 ]
 
 [project.scripts]
+aivis-ggml-onnx-ep-compile-cache = "onnxruntime_ep_aivis_ggml.cli:compile_cache_main"
 aivis-ggml-onnx-ep-inspect = "onnxruntime_ep_aivis_ggml.cli:inspect_model_signature_main"
 aivis-ggml-onnx-ep-prepare-cache = "onnxruntime_ep_aivis_ggml.cli:prepare_cache_main"
 aivis-ggml-onnx-ep-smoke-register = "onnxruntime_ep_aivis_ggml.cli:smoke_register_main"

@@ -229,7 +229,10 @@ manifests.
    real synthesis and JP-BERT graphs into external and embedded EPContext
    models, then load those precompiled models through payload-driven lazy
    restore. A second opt-in fixture writes a real synthesis GGUF with
-   `prepare_cache --write-gguf`. The manifest also records an explicit
+   `prepare_cache --write-gguf`, and the `compile-cache` command wraps that
+   path as the versioned offline compiler entry point with strict tensor
+   mapping, GGUF writing, ready-manifest validation, and compiled-model
+   compatibility metadata output. The manifest also records an explicit
    compatibility matrix covering ORT Plugin EP API version, TTS.cpp C API
    contract, GGUF schema expectation, model signature contracts, EPContext
    support level, EPContext payload version, and the compiled-model
@@ -346,6 +349,31 @@ aivis-ggml-onnx-ep-prepare-cache /path/to/model.aivmx \
 
 Use `--fail-on-unsupported-mapping` when validating that the current mapper has
 enough information to become a real converter.
+
+Run the versioned offline compiler for a release-ready synthesis GGUF artifact:
+
+```bash
+python tools/compile_cache.py /path/to/model.aivmx \
+  --cache-dir /path/to/cache \
+  --config-path /path/to/config.json \
+  --style-vectors-path /path/to/style_vectors.npy \
+  --backend vulkan \
+  --precision accurate \
+  --converter-version 0.1.0
+# or, after installing the package:
+aivis-ggml-onnx-ep-compile-cache /path/to/model.aivmx \
+  --cache-dir /path/to/cache \
+  --config-path /path/to/config.json \
+  --style-vectors-path /path/to/style_vectors.npy \
+  --backend vulkan \
+  --precision accurate \
+  --converter-version 0.1.0
+```
+
+This command always enables tensor-pack extraction, strict initializer mapping,
+GGUF writing, and `--require-ready` manifest validation. Its JSON output
+includes the generated `manifest.json`, `model.gguf`, cache key, and ORT
+`ep_compatibility_info` payload for model-package metadata.
 
 Validate a prepared cache manifest before deployment:
 

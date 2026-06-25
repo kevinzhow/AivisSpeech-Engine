@@ -456,6 +456,22 @@ validates the generated Aivis GGML payloads, and loads the precompiled models
 without passing `gguf_path` or `jp_bert_gguf_path`. That proves ORT
 `ModelCompiler` compatibility and payload-driven lazy restore, while keeping the
 deployment-specific `tts_cpp_library_path` outside the portable payload.
+- The ONNX Runtime Plugin EP route now also exposes a versioned offline
+  synthesis compiler command:
+
+```bash
+aivis-ggml-onnx-ep-compile-cache /path/to/model.aivmx \
+  --cache-dir /path/to/cache \
+  --config-path /path/to/config.json \
+  --style-vectors-path /path/to/style_vectors.npy \
+  --backend vulkan \
+  --precision accurate \
+  --converter-version 0.1.0
+```
+
+It writes the tensor pack and `model.gguf`, rejects incomplete initializer
+mapping, validates the ready manifest, and prints the ORT
+`ep_compatibility_info` payload needed by model-package variant metadata.
 - A strict managed-sidecar smoke test has been proven locally with the `まお` AIVMX/AIVM pair and a preconverted `mao-full-sdp.gguf`: the engine produced a float32 waveform and the sidecar log showed `POST /v1/style-bert-vits2/synthesize-front 200` on `AMD Radeon 780M Graphics (RADV PHOENIX)`.
 - That smoke test is now captured as an opt-in pytest integration test:
 

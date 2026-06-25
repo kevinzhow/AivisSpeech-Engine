@@ -290,10 +290,13 @@ logic back into AivisSpeech Engine.
      contract as portable JSON for `ep_compatibility_info`, and
      `ValidateCompiledModelCompatibilityInfo()` scores that metadata as
      optimal, prefer-recompile, unsupported, or not-applicable.
-   - Remaining production work: promote `prepare_cache --write-gguf` from a
-     local helper to a versioned offline compiler command in hosted CI, add a
-     package-owned JP-BERT GGUF writer, and expand the real-artifact matrix
-     across ORT/TTS.cpp/GGUF schema versions.
+   - `aivis-ggml-onnx-ep-compile-cache` is the versioned offline compiler
+     entry point for synthesis artifacts. It wraps tensor-pack extraction,
+     strict initializer mapping, GGUF writing, ready-manifest validation, and
+     `ep_compatibility_info` generation for ORT model-package metadata.
+   - Remaining production work: run that compiler in hosted CI with real
+     artifacts, add a package-owned JP-BERT GGUF writer, and expand the
+     real-artifact matrix across ORT/TTS.cpp/GGUF schema versions.
    - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
      TTS.cpp C API version, GGUF schema version, synthesis signature contract,
      and JP-BERT signature contract.

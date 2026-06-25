@@ -394,6 +394,101 @@ def test_compiled_model_compatibility_info_matches_native_contract(
     ) == "unsupported"
 
 
+def test_compile_cache_cli_runs_strict_offline_compiler(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The versioned compiler command wraps strict GGUF writing and validation."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cache, cli
+
+    captured_prepare_kwargs: dict[str, Any] = {}
+    manifest_path = tmp_path / "cache" / "manifest.json"
+    gguf_path = tmp_path / "cache" / "model.gguf"
+
+    def fake_prepare_ggml_cache(**kwargs: Any) -> Any:
+        captured_prepare_kwargs.update(kwargs)
+        return SimpleNamespace(
+            cache_key="cache-key",
+            manifest_path=manifest_path,
+            gguf_path=gguf_path,
+            manifest={"status": "ready"},
+        )
+
+    def fake_build_compiled_model_compatibility_info(**kwargs: Any) -> dict[str, Any]:
+        return {
+            "version": cache.COMPILED_MODEL_COMPATIBILITY_VERSION,
+            **kwargs,
+        }
+
+    monkeypatch.setattr(cache, "prepare_ggml_cache", fake_prepare_ggml_cache)
+    monkeypatch.setattr(cache, "validate_cache_manifest", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        cache,
+        "build_compiled_model_compatibility_info",
+        fake_build_compiled_model_compatibility_info,
+    )
+
+    model_path = tmp_path / "model.aivmx"
+    config_path = tmp_path / "config.json"
+    style_vectors_path = tmp_path / "style_vectors.npy"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "aivis-ggml-onnx-ep-compile-cache",
+            str(model_path),
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--config-path",
+            str(config_path),
+            "--style-vectors-path",
+            str(style_vectors_path),
+            "--backend",
+            "metal",
+            "--precision",
+            "fast",
+            "--device",
+            "gpu0",
+            "--converter-version",
+            "test-compiler",
+        ],
+    )
+
+    cli.compile_cache_main()
+    result = json.loads(capsys.readouterr().out)
+
+    assert captured_prepare_kwargs == {
+        "model_path": model_path,
+        "cache_dir": tmp_path / "cache",
+        "config_path": config_path,
+        "style_vectors_path": style_vectors_path,
+        "backend": "metal",
+        "precision": "fast",
+        "converter_version": "test-compiler",
+        "allow_unsupported": False,
+        "write_tensor_pack": True,
+        "write_gguf": True,
+        "fail_on_unsupported_mapping": True,
+    }
+    assert result == {
+        "cache_key": "cache-key",
+        "compiled_model_compatibility_info": {
+            "backend": "metal",
+            "device": "gpu0",
+            "graph_kind": "synthesis",
+            "precision": "fast",
+            "version": "aivis-ggml-compiled-model-compatibility-v1",
+        },
+        "errors": [],
+        "gguf_path": str(gguf_path),
+        "manifest_path": str(manifest_path),
+        "valid": True,
+    }
+
+
 def test_initializer_tensor_pack_preserves_initializer_order_and_bytes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
