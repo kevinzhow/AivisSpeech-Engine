@@ -60,6 +60,21 @@ ONNX Runtime passes selected options to `CreateEp()` with the
 backend/precision, optional cache manifest readiness, and optional TTS.cpp
 binding inputs before graph inspection or compile work.
 
+The generic ONNX Runtime session config `ep.context_enable=1` is recognized by
+the native EP. During `Compile()`, supported synthesis and JP-BERT graphs return
+official `com.microsoft::EPContext` nodes with an Aivis GGML JSON context
+payload. `ep.context_embed_mode=1` embeds that payload into the
+`ep_cache_context` attribute. `ep.context_embed_mode=0` writes a JSON context
+file next to `ep.context_file_path` and records only the relative file name in
+`ep_cache_context`.
+
+Loading a precompiled EPContext model is supported when the application still
+passes the same TTS.cpp provider options (`tts_cpp_library_path`, `gguf_path`,
+`jp_bert_gguf_path`, `eager_load_model=1`, and the relevant `claim_*_graph=1`).
+The remaining production work is context-payload-driven lazy runtime restore,
+where the provider can recover artifact paths from the EPContext payload instead
+of requiring the same provider options again.
+
 ## Current Status
 
 This directory currently provides:
@@ -82,10 +97,21 @@ This directory currently provides:
 - A strict GGUF writer entry point for ready converter plans. It writes
   `model.gguf` only after tensor mapping, external sources, and initializer
   counts are complete.
+- A cache manifest validator for deployment gates. It checks manifest version,
+  signature/runtime contracts, EPContext-lite metadata, readiness status when
+  requested, and portable relative artifact paths.
+- A deployment compatibility matrix in every manifest. It records the provider
+  version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API contract,
+  GGUF schema expectation, signature contract versions, and official
+  EPContext support level.
 - A native TTS.cpp binding readiness gate. With `eager_load_model=1`,
   `CreateEp()` dlopens `tts_cpp_library_path`, resolves the Style-Bert-VITS2
   and JP-BERT C API symbols, and loads configured GGUF paths. This keeps
   TTS.cpp-specific logic out of AivisSpeech Engine.
+- A process-local TTS.cpp runtime registry. Sessions with the same
+  library/backend/device/thread/model tuple reuse one loaded TTS.cpp runtime
+  instead of reloading the same synthesis and JP-BERT GGUF artifacts for every
+  ONNX session.
 
 The native EP reports `AivisGgmlExecutionProvider` to ONNX Runtime through the
 Plugin EP ABI. `GetCapability()` inspects ORT graphs for the known Aivis
@@ -103,10 +129,23 @@ fused subgraph inputs/outputs. The synthesis bridge calls TTS.cpp
 `tts_style_bert_vits2_jp_bert_encode_features` and writes the ONNX `output`
 tensor as `[tokens, 1024]`.
 
+The native bridge resolves all required TTS.cpp Style-Bert-VITS2 C API symbols
+before graph claim is possible. It also checks optional version symbols when a
+newer TTS.cpp build exports them:
+
+- `tts_style_bert_vits2_runtime_abi_version`
+- `tts_style_bert_vits2_gguf_schema_version`
+
+Missing version symbols are treated as the legacy contract for compatibility
+with current TTS.cpp builds; mismatched exported versions fail during
+`CreateEp()` before any graph is claimed.
+
 The cache preparer writes a portable `manifest.json` under a stable cache key
-directory. It records source file size/hash, graph signature, provider options,
-planned artifact names, and optionally an `initializers.bin` tensor pack.
-Without `--write-gguf`, the cache entry remains a planned compile artifact.
+directory. It records source file size/hash, graph signature, a versioned
+signature contract, a TTS.cpp runtime contract, a compatibility matrix, an
+EPContext-lite artifact layout, provider options, planned artifact names, and
+optionally an `initializers.bin` tensor pack. Without `--write-gguf`, the cache
+entry remains a planned compile artifact.
 
 When a tensor pack is written, the manifest also includes
 `tts_cpp_tensor_mapping`. Direct mappings use tensor names accepted by the local
@@ -131,20 +170,50 @@ absolute paths are not stored in the manifest.
 `--write-gguf` upgrades the cache entry from planned to ready only when the
 converter readiness report has no blockers. It requires `--write-tensor-pack`,
 `--config-path`, `--style-vectors-path`, and the optional `convert` Python
-extra so the `gguf` writer module is available. If any mapping, weight-norm
-pair, or metadata is incomplete, the command fails before creating a partial
-GGUF.
+extra so the `gguf` writer module is available. Written GGUF artifacts must use
+a real `--converter-version`; `unimplemented` is rejected for `--write-gguf`.
+If any mapping, weight-norm pair, or metadata is incomplete, the command fails
+before creating a partial GGUF.
 
-The Python signature inspector defines the raw synthesis graph gate for the native EP:
-the current supported Aivis Style-Bert-VITS2 ONNX export has 11 inputs, 7
-outputs, 5334 nodes, 948 initializers, opset 18, and stable op-sequence /
-initializer-name hashes. The supported JP-BERT ONNX export has 2 inputs, 1
-output, 3619 raw nodes, 432 raw initializers, and opset 17; the native gate also
-accepts observed ORT-optimized variants of that graph. The Python inspector
-remains the authoritative exact-hash checker for raw model files.
+The Python signature inspector defines the raw synthesis and JP-BERT graph
+contracts for the native EP. The current supported Aivis Style-Bert-VITS2 ONNX
+export has 11 inputs, 7 outputs, 5334 nodes, 948 initializers, opset 18, and
+stable op-sequence / initializer-name hashes. The supported JP-BERT ONNX export
+has 2 inputs, 1 output, 3619 raw nodes, 432 raw initializers, and opset 17; the
+native gate also accepts observed ORT-optimized variants of that graph. The
+inspector prints both match results plus a structural contract hash for cache
+manifests.
 
-The next native steps are reducing duplicated model loads across multiple ONNX
-sessions and broadening parity/performance tests on Vulkan and Metal devices.
+## Production Hardening Stages
+
+1. Runtime registry and ABI gate: implemented. The native EP now reuses a
+   process-local TTS.cpp runtime for identical library/backend/device/thread
+   and GGUF inputs. Required C API symbols are resolved before graph claim, and
+   optional TTS.cpp ABI/schema version symbols are enforced when present.
+2. Signature contract: implemented for cache tooling. The Python inspector and
+   manifest now record `aivis-ggml-signature-contract-v1`, structural graph
+   hashes, synthesis match results, and JP-BERT match results. Native
+   `GetCapability()` still uses ORT graph structural checks because ORT sees
+   optimized fused graphs rather than the raw model file.
+3. EPContext-lite: implemented as manifest metadata. The manifest records
+   `aivis-ggml-ep-context-lite-v1`, relative artifact names, provider options,
+   and cache key without storing absolute local paths. This is not yet the
+   official ONNX Runtime `EPContext` node path.
+4. Official ORT EPContext: generation implemented, provider-option-based
+   inference implemented. The native EP honors `ep.context_enable` by returning
+   real EPContext nodes from `Compile()` and writing/embedding a portable JSON
+   payload. When a precompiled EPContext model is loaded, the provider claims
+   `source=AivisGgmlExecutionProvider` nodes and routes them through the same
+   synthesis/JP-BERT compute bridge if the matching TTS.cpp runtime options are
+   provided. The remaining work is lazy runtime restore directly from the
+   EPContext payload.
+5. Offline compiler lifecycle: partially implemented. The cache manifest
+   validator now provides a deployment gate for manifest/runtime/signature and
+   portable artifact layout compatibility. The manifest also records an
+   explicit compatibility matrix covering ORT Plugin EP API version, TTS.cpp C
+   API contract, GGUF schema expectation, model signature contracts, and
+   EPContext support level. The remaining work is broader real-model CI
+   fixtures for GGUF generation and EPContext round trips.
 
 ## Native Build
 
@@ -250,3 +319,11 @@ aivis-ggml-onnx-ep-prepare-cache /path/to/model.aivmx \
 
 Use `--fail-on-unsupported-mapping` when validating that the current mapper has
 enough information to become a real converter.
+
+Validate a prepared cache manifest before deployment:
+
+```bash
+python tools/validate_cache_manifest.py /path/to/cache/<key>/manifest.json --require-ready
+# or, after installing the package:
+aivis-ggml-onnx-ep-validate-cache /path/to/cache/<key>/manifest.json --require-ready
+```

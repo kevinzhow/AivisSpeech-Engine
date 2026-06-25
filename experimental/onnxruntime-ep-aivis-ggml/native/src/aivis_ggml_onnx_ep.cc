@@ -2,6 +2,7 @@
 #include <array>
 #include <cctype>
 #include <cstddef>
+#include <cstdlib>
 #include <cstdint>
 #include <exception>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -43,6 +45,10 @@ constexpr const char* kEpName = "AivisGgmlExecutionProvider";
 constexpr const char* kVendor = "Aivis Project";
 constexpr const char* kVersion = "0.1.0";
 constexpr const char* kStage = "synthesis-jp-bert-bridge";
+constexpr const char* kRuntimeRegistryContract = "aivis-ggml-runtime-registry-v1";
+constexpr const char* kTtsCppRuntimeContract = "tts-style-bert-vits2-c-api-v1";
+constexpr uint32_t kExpectedTtsCppRuntimeAbiVersion = 1;
+constexpr uint32_t kExpectedTtsCppGgufSchemaVersion = 1;
 constexpr int64_t kExpectedIrVersion = 8;
 constexpr int64_t kExpectedOpsetVersion = 18;
 constexpr const char* kExpectedGraphName = "main_graph";
@@ -248,8 +254,26 @@ struct AivisGgmlEpConfig {
   bool eager_load_model = false;
   bool claim_synthesis_graph = false;
   bool claim_jp_bert_graph = false;
+  bool ort_ep_context_enable = false;
+  bool ort_ep_context_embed_mode = false;
+  std::string ort_ep_context_file_path;
+  std::string ort_ep_context_node_name_prefix;
   int n_threads = 0;
 };
+
+std::string ReadSessionOption(
+    const OrtSessionOptions* session_options,
+    const std::string& option_name,
+    const std::string& default_value) {
+  if (session_options == nullptr) {
+    return default_value;
+  }
+  Ort::ConstSessionOptions options{session_options};
+  if (options.HasConfigEntry(option_name.c_str())) {
+    return options.GetConfigEntry(option_name.c_str());
+  }
+  return default_value;
+}
 
 std::string ReadEpOption(
     const OrtSessionOptions* session_options,
@@ -330,6 +354,22 @@ AivisGgmlEpConfig ReadEpConfig(const OrtSessionOptions* session_options) {
       ReadEpOption(session_options, "claim_jp_bert_graph", "0"),
       false,
       "claim_jp_bert_graph");
+  config.ort_ep_context_enable = ParseBoolOption(
+      ReadSessionOption(session_options, "ep.context_enable", "0"),
+      false,
+      "ep.context_enable");
+  config.ort_ep_context_file_path = ReadSessionOption(
+      session_options,
+      "ep.context_file_path",
+      "");
+  config.ort_ep_context_embed_mode = ParseBoolOption(
+      ReadSessionOption(session_options, "ep.context_embed_mode", "0"),
+      false,
+      "ep.context_embed_mode");
+  config.ort_ep_context_node_name_prefix = ReadSessionOption(
+      session_options,
+      "ep.context_node_name_prefix",
+      "");
   config.n_threads = ParseNonNegativeIntOption(
       ReadEpOption(session_options, "n_threads", "0"),
       0,
@@ -473,6 +513,8 @@ std::string ConfigSummary(const AivisGgmlEpConfig& config) {
       << ", eager_load_model=" << (config.eager_load_model ? "true" : "false")
       << ", claim_synthesis_graph=" << (config.claim_synthesis_graph ? "true" : "false")
       << ", claim_jp_bert_graph=" << (config.claim_jp_bert_graph ? "true" : "false")
+      << ", ort_ep_context_enable=" << (config.ort_ep_context_enable ? "true" : "false")
+      << ", ort_ep_context_embed_mode=" << (config.ort_ep_context_embed_mode ? "true" : "false")
       << ", n_threads=" << config.n_threads;
   return out.str();
 }
@@ -523,6 +565,15 @@ class DynamicLibrary final {
       throw std::runtime_error(std::string("missing TTS.cpp symbol: ") + name);
     }
     return symbol;
+  }
+
+  void* OptionalSymbol(const char* name) const noexcept {
+#if defined(_WIN32)
+    return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(handle_), name));
+#else
+    dlerror();
+    return dlsym(handle_, name);
+#endif
   }
 
  private:
@@ -681,6 +732,7 @@ const float* ExpectStyleVecInput(Ort::ConstValue value) {
 class TtsCppRuntime final {
  public:
   using LastErrorFn = const char* (*)();
+  using Uint32Fn = uint32_t (*)();
   using LoadModelFn = int (*)(
       const char* model_path,
       int n_threads,
@@ -731,9 +783,9 @@ class TtsCppRuntime final {
       size_t tokens,
       tts_style_bert_vits2_float_buffer* out_features);
 
-  static std::unique_ptr<TtsCppRuntime> LoadAndMaybeOpenModel(const AivisGgmlEpConfig& config) {
+  static std::shared_ptr<TtsCppRuntime> LoadAndMaybeOpenModel(const AivisGgmlEpConfig& config) {
     auto library = DynamicLibrary::Load(config.tts_cpp_library_path);
-    auto runtime = std::unique_ptr<TtsCppRuntime>(new TtsCppRuntime(std::move(library)));
+    auto runtime = std::shared_ptr<TtsCppRuntime>(new TtsCppRuntime(std::move(library)));
     runtime->last_error_ = reinterpret_cast<LastErrorFn>(
         runtime->library_->Symbol("tts_style_bert_vits2_last_error"));
     runtime->load_model_ = reinterpret_cast<LoadModelFn>(
@@ -750,6 +802,11 @@ class TtsCppRuntime final {
         runtime->library_->Symbol("tts_style_bert_vits2_synthesize_front_with_style_vec"));
     runtime->encode_jp_bert_features_ = reinterpret_cast<EncodeJpBertFeaturesFn>(
         runtime->library_->Symbol("tts_style_bert_vits2_jp_bert_encode_features"));
+    runtime->runtime_abi_version_ = reinterpret_cast<Uint32Fn>(
+        runtime->library_->OptionalSymbol("tts_style_bert_vits2_runtime_abi_version"));
+    runtime->gguf_schema_version_ = reinterpret_cast<Uint32Fn>(
+        runtime->library_->OptionalSymbol("tts_style_bert_vits2_gguf_schema_version"));
+    runtime->ValidateOptionalVersionSymbols();
 
     const int cpu_only = config.backend == "cpu" ? 1 : 0;
     if (!config.gguf_path.empty()) {
@@ -794,6 +851,14 @@ class TtsCppRuntime final {
 
   bool HasJpBertModel() const noexcept {
     return jp_bert_handle_ != nullptr;
+  }
+
+  std::string ContractSummary() const {
+    std::ostringstream out;
+    out << "contract=" << kTtsCppRuntimeContract
+        << ", runtime_abi=" << OptionalVersionString(runtime_abi_version_)
+        << ", gguf_schema=" << OptionalVersionString(gguf_schema_version_);
+    return out.str();
   }
 
   bool SynthesizeFrontWithStyleVec(
@@ -868,8 +933,38 @@ class TtsCppRuntime final {
   explicit TtsCppRuntime(std::unique_ptr<DynamicLibrary> library)
       : library_(std::move(library)) {}
 
+  static std::string OptionalVersionString(Uint32Fn version_fn) {
+    if (version_fn == nullptr) {
+      return "legacy";
+    }
+    return std::to_string(version_fn());
+  }
+
+  void ValidateOptionalVersionSymbols() const {
+    if (runtime_abi_version_ != nullptr) {
+      const uint32_t actual = runtime_abi_version_();
+      if (actual != kExpectedTtsCppRuntimeAbiVersion) {
+        std::ostringstream message;
+        message << "TTS.cpp Style-Bert-VITS2 runtime ABI version " << actual
+                << " != " << kExpectedTtsCppRuntimeAbiVersion << ".";
+        throw std::runtime_error(message.str());
+      }
+    }
+    if (gguf_schema_version_ != nullptr) {
+      const uint32_t actual = gguf_schema_version_();
+      if (actual != kExpectedTtsCppGgufSchemaVersion) {
+        std::ostringstream message;
+        message << "TTS.cpp Style-Bert-VITS2 GGUF schema version " << actual
+                << " != " << kExpectedTtsCppGgufSchemaVersion << ".";
+        throw std::runtime_error(message.str());
+      }
+    }
+  }
+
   std::unique_ptr<DynamicLibrary> library_;
   LastErrorFn last_error_ = nullptr;
+  Uint32Fn runtime_abi_version_ = nullptr;
+  Uint32Fn gguf_schema_version_ = nullptr;
   LoadModelFn load_model_ = nullptr;
   FreeModelFn free_model_ = nullptr;
   LoadJpBertModelFn load_jp_bert_model_ = nullptr;
@@ -880,6 +975,70 @@ class TtsCppRuntime final {
   tts_style_bert_vits2_handle* model_handle_ = nullptr;
   tts_style_bert_vits2_jp_bert_handle* jp_bert_handle_ = nullptr;
   std::mutex mutex_;
+};
+
+std::string NormalizeRuntimeRegistryPath(const std::string& raw_path) {
+  if (raw_path.empty()) {
+    return "";
+  }
+  std::error_code error;
+  std::filesystem::path normalized = std::filesystem::weakly_canonical(raw_path, error);
+  if (error) {
+    error.clear();
+    normalized = std::filesystem::absolute(raw_path, error);
+  }
+  if (error) {
+    normalized = std::filesystem::path(raw_path);
+  }
+  return normalized.lexically_normal().string();
+}
+
+std::string BuildRuntimeRegistryKey(const AivisGgmlEpConfig& config) {
+  std::ostringstream out;
+  out << kRuntimeRegistryContract
+      << "\nbackend=" << config.backend
+      << "\ndevice=" << config.device
+      << "\nprecision=" << config.precision
+      << "\nn_threads=" << config.n_threads
+      << "\ntts_cpp_library_path=" << NormalizeRuntimeRegistryPath(config.tts_cpp_library_path)
+      << "\ngguf_path=" << NormalizeRuntimeRegistryPath(config.gguf_path)
+      << "\njp_bert_gguf_path=" << NormalizeRuntimeRegistryPath(config.jp_bert_gguf_path);
+  return out.str();
+}
+
+class TtsCppRuntimeRegistry final {
+ public:
+  static std::shared_ptr<TtsCppRuntime> Acquire(
+      const AivisGgmlEpConfig& config,
+      bool& reused) {
+    reused = false;
+    const std::string key = BuildRuntimeRegistryKey(config);
+    std::lock_guard<std::mutex> lock(Mutex());
+    auto& registry = Registry();
+    const auto existing = registry.find(key);
+    if (existing != registry.end()) {
+      if (std::shared_ptr<TtsCppRuntime> runtime = existing->second.lock()) {
+        reused = true;
+        return runtime;
+      }
+      registry.erase(existing);
+    }
+
+    std::shared_ptr<TtsCppRuntime> runtime = TtsCppRuntime::LoadAndMaybeOpenModel(config);
+    registry.emplace(key, runtime);
+    return runtime;
+  }
+
+ private:
+  static std::mutex& Mutex() {
+    static std::mutex mutex;
+    return mutex;
+  }
+
+  static std::unordered_map<std::string, std::weak_ptr<TtsCppRuntime>>& Registry() {
+    static std::unordered_map<std::string, std::weak_ptr<TtsCppRuntime>> registry;
+    return registry;
+  }
 };
 
 enum class AivisGgmlGraphKind {
@@ -897,16 +1056,365 @@ const char* GraphKindName(AivisGgmlGraphKind graph_kind) noexcept {
   return "unknown";
 }
 
+std::string JsonEscape(const std::string& value) {
+  std::ostringstream out;
+  for (char raw : value) {
+    const unsigned char c = static_cast<unsigned char>(raw);
+    switch (c) {
+      case '\\':
+        out << "\\\\";
+        break;
+      case '"':
+        out << "\\\"";
+        break;
+      case '\b':
+        out << "\\b";
+        break;
+      case '\f':
+        out << "\\f";
+        break;
+      case '\n':
+        out << "\\n";
+        break;
+      case '\r':
+        out << "\\r";
+        break;
+      case '\t':
+        out << "\\t";
+        break;
+      default:
+        if (c < 0x20) {
+          out << "\\u00";
+          const char* hex = "0123456789abcdef";
+          out << hex[(c >> 4) & 0x0F] << hex[c & 0x0F];
+        } else {
+          out << raw;
+        }
+        break;
+    }
+  }
+  return out.str();
+}
+
+bool HasParentDirectoryTraversal(const std::filesystem::path& path) {
+  return std::any_of(
+      path.begin(),
+      path.end(),
+      [](const std::filesystem::path& component) {
+        return component == "..";
+      });
+}
+
+std::filesystem::path EpContextModelDirectory(const AivisGgmlEpConfig& config) {
+  if (config.ort_ep_context_file_path.empty()) {
+    if (!config.ort_ep_context_embed_mode) {
+      throw std::runtime_error(
+          "AivisGgmlExecutionProvider ep.context_file_path is required when "
+          "ep.context_enable=1 and ep.context_embed_mode=0.");
+    }
+    return {};
+  }
+  std::filesystem::path context_model_path(config.ort_ep_context_file_path);
+  std::filesystem::path directory = context_model_path.parent_path();
+  if (directory.empty()) {
+    directory = ".";
+  }
+  return directory;
+}
+
+std::string PortablePathForEpContext(
+    const std::string& raw_path,
+    const std::filesystem::path& context_model_directory,
+    const char* option_name) {
+  if (raw_path.empty()) {
+    return "";
+  }
+  if (context_model_directory.empty()) {
+    return std::filesystem::path(raw_path).filename().string();
+  }
+
+  std::error_code error;
+  const std::filesystem::path absolute_target =
+      std::filesystem::weakly_canonical(raw_path, error);
+  if (error) {
+    throw std::runtime_error(std::string("could not canonicalize ") + option_name + ".");
+  }
+
+  error.clear();
+  const std::filesystem::path absolute_base =
+      std::filesystem::absolute(context_model_directory, error).lexically_normal();
+  if (error) {
+    throw std::runtime_error("could not resolve ep.context_file_path directory.");
+  }
+
+  error.clear();
+  std::filesystem::path relative_path =
+      std::filesystem::relative(absolute_target, absolute_base, error);
+  if (error || relative_path.empty() || relative_path.is_absolute() ||
+      HasParentDirectoryTraversal(relative_path)) {
+    throw std::runtime_error(
+        std::string("AivisGgmlExecutionProvider ") + option_name +
+        " must be in the ep.context_file_path directory or one of its subdirectories "
+        "when generating a portable EPContext model.");
+  }
+  return relative_path.generic_string();
+}
+
+std::string BuildEpContextPayload(
+    const AivisGgmlEpConfig& config,
+    AivisGgmlGraphKind graph_kind,
+    const OrtGraph* ort_graph,
+    size_t graph_index) {
+  const std::filesystem::path context_model_directory = EpContextModelDirectory(config);
+  Ort::ConstGraph graph{ort_graph};
+  std::ostringstream out;
+  out << "{";
+  out << "\"version\":\"aivis-ggml-official-ep-context-v1\"";
+  out << ",\"provider_name\":\"" << kEpName << "\"";
+  out << ",\"provider_version\":\"" << kVersion << "\"";
+  out << ",\"runtime_registry_contract\":\"" << kRuntimeRegistryContract << "\"";
+  out << ",\"tts_cpp_runtime_contract\":\"" << kTtsCppRuntimeContract << "\"";
+  out << ",\"graph_kind\":\"" << GraphKindName(graph_kind) << "\"";
+  out << ",\"graph_name\":\"" << JsonEscape(graph.GetName()) << "\"";
+  out << ",\"graph_index\":" << graph_index;
+  out << ",\"backend\":\"" << JsonEscape(config.backend) << "\"";
+  out << ",\"device\":\"" << JsonEscape(config.device) << "\"";
+  out << ",\"precision\":\"" << JsonEscape(config.precision) << "\"";
+  out << ",\"n_threads\":" << config.n_threads;
+  out << ",\"artifacts\":{";
+  out << "\"cache_manifest_path\":\""
+      << JsonEscape(PortablePathForEpContext(
+             config.cache_manifest_path,
+             context_model_directory,
+             "cache_manifest_path"))
+      << "\"";
+  out << ",\"gguf_path\":\""
+      << JsonEscape(PortablePathForEpContext(
+             config.gguf_path,
+             context_model_directory,
+             "gguf_path"))
+      << "\"";
+  out << ",\"jp_bert_gguf_path\":\""
+      << JsonEscape(PortablePathForEpContext(
+             config.jp_bert_gguf_path,
+             context_model_directory,
+             "jp_bert_gguf_path"))
+      << "\"";
+  out << "}}";
+  return out.str();
+}
+
+std::string EpContextExternalFilename(
+    const AivisGgmlEpConfig& config,
+    AivisGgmlGraphKind graph_kind,
+    size_t graph_index) {
+  std::filesystem::path context_model_path(config.ort_ep_context_file_path);
+  std::string stem = context_model_path.stem().string();
+  if (stem.empty()) {
+    stem = "model_ctx";
+  }
+  std::ostringstream filename;
+  filename << stem << "_aivis_ggml_" << GraphKindName(graph_kind)
+           << "_" << graph_index << ".json";
+  return filename.str();
+}
+
+std::string WriteEpContextPayloadFile(
+    const AivisGgmlEpConfig& config,
+    AivisGgmlGraphKind graph_kind,
+    size_t graph_index,
+    const std::string& payload) {
+  const std::filesystem::path directory = EpContextModelDirectory(config);
+  const std::string filename = EpContextExternalFilename(config, graph_kind, graph_index);
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  if (error) {
+    throw std::runtime_error("could not create ep.context_file_path directory.");
+  }
+
+  const std::filesystem::path output_path = directory / filename;
+  std::ofstream file(output_path, std::ios::binary | std::ios::trunc);
+  if (!file) {
+    throw std::runtime_error("could not create Aivis GGML EPContext payload file.");
+  }
+  file << payload;
+  if (!file) {
+    throw std::runtime_error("could not write Aivis GGML EPContext payload file.");
+  }
+  return filename;
+}
+
+OrtStatus* AddInt64OpAttr(
+    const OrtApi& api,
+    std::vector<OrtOpAttr*>& attributes,
+    const char* name,
+    int64_t value) {
+  OrtOpAttr* attribute = nullptr;
+  OrtStatus* status = api.CreateOpAttr(
+      name,
+      &value,
+      1,
+      ORT_OP_ATTR_INT,
+      &attribute);
+  if (status != nullptr) {
+    return status;
+  }
+  attributes.push_back(attribute);
+  return nullptr;
+}
+
+OrtStatus* AddStringOpAttr(
+    const OrtApi& api,
+    std::vector<OrtOpAttr*>& attributes,
+    const char* name,
+    const std::string& value) {
+  OrtOpAttr* attribute = nullptr;
+  OrtStatus* status = api.CreateOpAttr(
+      name,
+      value.data(),
+      static_cast<int>(value.size()),
+      ORT_OP_ATTR_STRING,
+      &attribute);
+  if (status != nullptr) {
+    return status;
+  }
+  attributes.push_back(attribute);
+  return nullptr;
+}
+
+void ReleaseOpAttrs(const OrtApi& api, std::vector<OrtOpAttr*>& attributes) noexcept {
+  for (OrtOpAttr* attribute : attributes) {
+    if (attribute != nullptr) {
+      api.ReleaseOpAttr(attribute);
+    }
+  }
+  attributes.clear();
+}
+
+OrtStatus* CreateEpContextNode(
+    const OrtApi& api,
+    const AivisGgmlEpConfig& config,
+    const OrtGraph* ort_graph,
+    AivisGgmlGraphKind graph_kind,
+    size_t graph_index,
+    OrtNode** ep_context_node) noexcept {
+  if (ep_context_node == nullptr) {
+    return CreateStatus(api, ORT_INVALID_ARGUMENT, "EPContext node output is null.");
+  }
+  *ep_context_node = nullptr;
+
+  try {
+    const OrtModelEditorApi* model_editor_api = api.GetModelEditorApi();
+    if (model_editor_api == nullptr) {
+      return CreateStatus(
+          api,
+          ORT_NOT_IMPLEMENTED,
+          "ONNX Runtime Model Editor API is unavailable; cannot create EPContext nodes.");
+    }
+
+    Ort::ConstGraph graph{ort_graph};
+    std::vector<std::string> input_names;
+    std::vector<std::string> output_names;
+    for (const Ort::ConstValueInfo& input : graph.GetInputs()) {
+      input_names.push_back(input.GetName());
+    }
+    for (const Ort::ConstValueInfo& output : graph.GetOutputs()) {
+      output_names.push_back(output.GetName());
+    }
+
+    std::vector<const char*> input_name_ptrs;
+    std::vector<const char*> output_name_ptrs;
+    input_name_ptrs.reserve(input_names.size());
+    output_name_ptrs.reserve(output_names.size());
+    for (const std::string& name : input_names) {
+      input_name_ptrs.push_back(name.c_str());
+    }
+    for (const std::string& name : output_names) {
+      output_name_ptrs.push_back(name.c_str());
+    }
+
+    const std::string payload =
+        BuildEpContextPayload(config, graph_kind, ort_graph, graph_index);
+    const int64_t embed_mode = config.ort_ep_context_embed_mode ? 1 : 0;
+    const std::string ep_cache_context =
+        config.ort_ep_context_embed_mode
+            ? payload
+            : WriteEpContextPayloadFile(config, graph_kind, graph_index, payload);
+    const std::string prefix =
+        config.ort_ep_context_node_name_prefix.empty()
+            ? std::string(kEpName)
+            : config.ort_ep_context_node_name_prefix;
+    std::ostringstream node_name;
+    node_name << prefix << "_" << GraphKindName(graph_kind)
+              << "_ep_context_" << graph_index;
+    const std::string partition_name =
+        std::string(GraphKindName(graph_kind)) + "_" + std::to_string(graph_index);
+    const std::string hardware_architecture =
+        config.device.empty() ? config.backend : config.backend + ":" + config.device;
+    const std::string ep_sdk_version =
+        std::string("onnxruntime-ep-aivis-ggml/") + kVersion;
+
+    std::vector<OrtOpAttr*> attributes;
+    attributes.reserve(8);
+    OrtStatus* status = AddInt64OpAttr(api, attributes, "main_context", 1);
+    if (status == nullptr) {
+      status = AddStringOpAttr(api, attributes, "ep_cache_context", ep_cache_context);
+    }
+    if (status == nullptr) {
+      status = AddInt64OpAttr(api, attributes, "embed_mode", embed_mode);
+    }
+    if (status == nullptr) {
+      status = AddStringOpAttr(api, attributes, "source", kEpName);
+    }
+    if (status == nullptr) {
+      status = AddStringOpAttr(api, attributes, "ep_sdk_version", ep_sdk_version);
+    }
+    if (status == nullptr) {
+      status = AddStringOpAttr(api, attributes, "partition_name", partition_name);
+    }
+    if (status == nullptr) {
+      status = AddStringOpAttr(api, attributes, "hardware_architecture", hardware_architecture);
+    }
+    if (status == nullptr) {
+      status = AddStringOpAttr(api, attributes, "notes", "aivis-ggml-official-ep-context-v1");
+    }
+    if (status != nullptr) {
+      ReleaseOpAttrs(api, attributes);
+      return status;
+    }
+
+    status = model_editor_api->CreateNode(
+        "EPContext",
+        "com.microsoft",
+        node_name.str().c_str(),
+        input_name_ptrs.data(),
+        input_name_ptrs.size(),
+        output_name_ptrs.data(),
+        output_name_ptrs.size(),
+        attributes.data(),
+        attributes.size(),
+        ep_context_node);
+    ReleaseOpAttrs(api, attributes);
+    return status;
+  } catch (const std::bad_alloc&) {
+    return CreateStatus(api, ORT_FAIL, "Out of memory creating Aivis GGML EPContext node.");
+  } catch (const std::exception& ex) {
+    return CreateStatus(api, ORT_FAIL, ex.what());
+  } catch (...) {
+    return CreateStatus(api, ORT_FAIL, "Unknown error creating Aivis GGML EPContext node.");
+  }
+}
+
 struct AivisGgmlNodeComputeInfo final : OrtNodeComputeInfo {
   AivisGgmlNodeComputeInfo(
       const OrtApi& ort_api,
-      TtsCppRuntime* runtime,
+      std::shared_ptr<TtsCppRuntime> runtime,
       AivisGgmlGraphKind graph_kind,
       std::vector<size_t> input_indices,
       size_t primary_output_index)
       : OrtNodeComputeInfo{},
         ort_api_(ort_api),
-        runtime_(runtime),
+        runtime_(std::move(runtime)),
         graph_kind_(graph_kind),
         input_indices_(std::move(input_indices)),
         primary_output_index_(primary_output_index) {
@@ -1179,7 +1687,7 @@ struct AivisGgmlNodeComputeInfo final : OrtNodeComputeInfo {
   }
 
   const OrtApi& ort_api_;
-  TtsCppRuntime* runtime_;
+  std::shared_ptr<TtsCppRuntime> runtime_;
   AivisGgmlGraphKind graph_kind_;
   std::vector<size_t> input_indices_;
   size_t primary_output_index_;
@@ -1192,6 +1700,23 @@ struct GraphSignatureGateResult {
   void Reject(std::string reason) {
     supported = false;
     reasons.push_back(std::move(reason));
+  }
+};
+
+struct EpContextGateResult {
+  bool supported = false;
+  AivisGgmlGraphKind graph_kind = AivisGgmlGraphKind::Synthesis;
+  std::vector<std::string> reasons;
+
+  void Reject(std::string reason) {
+    supported = false;
+    reasons.push_back(std::move(reason));
+  }
+
+  void Accept(AivisGgmlGraphKind accepted_graph_kind) {
+    supported = true;
+    graph_kind = accepted_graph_kind;
+    reasons.clear();
   }
 };
 
@@ -1456,13 +1981,110 @@ GraphSignatureGateResult MatchStyleBertVits2JpBertGraph(const OrtGraph* ort_grap
   return result;
 }
 
+bool ReadStringNodeAttribute(
+    const Ort::ConstNode& node,
+    const std::string& name,
+    std::string& value) {
+  Ort::ConstOpAttr attribute{nullptr};
+  Ort::Status status = node.GetAttributeByName(name, attribute);
+  if (!status.IsOK() || attribute == nullptr) {
+    return false;
+  }
+  status = attribute.GetValue<std::string>(value);
+  return status.IsOK();
+}
+
+EpContextGateResult MatchAivisGgmlEpContextGraph(const OrtGraph* ort_graph) {
+  EpContextGateResult result;
+  Ort::ConstGraph graph{ort_graph};
+  const std::vector<Ort::ConstNode> nodes = graph.GetNodes();
+  if (nodes.size() != 1) {
+    std::ostringstream reason;
+    reason << "EPContext graph node count " << nodes.size() << " != 1";
+    result.Reject(reason.str());
+    return result;
+  }
+
+  const Ort::ConstNode node = nodes[0];
+  if (node.GetOperatorType() != "EPContext" || node.GetDomain() != "com.microsoft") {
+    std::ostringstream reason;
+    reason << "single node is not com.microsoft::EPContext, got "
+           << node.GetDomain() << "::" << node.GetOperatorType();
+    result.Reject(reason.str());
+    return result;
+  }
+
+  std::string source;
+  if (!ReadStringNodeAttribute(node, "source", source)) {
+    result.Reject("EPContext source attribute is missing or unreadable");
+    return result;
+  }
+  if (source != kEpName) {
+    std::ostringstream reason;
+    reason << "EPContext source '" << source << "' != '" << kEpName << "'";
+    result.Reject(reason.str());
+    return result;
+  }
+
+  std::string partition_name;
+  if (!ReadStringNodeAttribute(node, "partition_name", partition_name)) {
+    result.Reject("EPContext partition_name attribute is missing or unreadable");
+    return result;
+  }
+
+  const std::vector<Ort::ConstValueInfo> inputs = graph.GetInputs();
+  const std::vector<Ort::ConstValueInfo> outputs = graph.GetOutputs();
+  if (partition_name.rfind("synthesis", 0) == 0) {
+    if (inputs.size() != kExpectedInputNames.size()) {
+      std::ostringstream reason;
+      reason << "EPContext synthesis input count " << inputs.size()
+             << " != " << kExpectedInputNames.size();
+      result.Reject(reason.str());
+      return result;
+    }
+    if (outputs.size() != kExpectedOutputCount) {
+      std::ostringstream reason;
+      reason << "EPContext synthesis output count " << outputs.size()
+             << " != " << kExpectedOutputCount;
+      result.Reject(reason.str());
+      return result;
+    }
+    result.Accept(AivisGgmlGraphKind::Synthesis);
+    return result;
+  }
+
+  if (partition_name.rfind("jp-bert", 0) == 0) {
+    if (inputs.size() != kExpectedJpBertInputCount) {
+      std::ostringstream reason;
+      reason << "EPContext JP-BERT input count " << inputs.size()
+             << " != " << kExpectedJpBertInputCount;
+      result.Reject(reason.str());
+      return result;
+    }
+    if (outputs.size() != kExpectedJpBertOutputCount) {
+      std::ostringstream reason;
+      reason << "EPContext JP-BERT output count " << outputs.size()
+             << " != " << kExpectedJpBertOutputCount;
+      result.Reject(reason.str());
+      return result;
+    }
+    result.Accept(AivisGgmlGraphKind::JpBert);
+    return result;
+  }
+
+  std::ostringstream reason;
+  reason << "EPContext partition_name '" << partition_name << "' is unsupported";
+  result.Reject(reason.str());
+  return result;
+}
+
 struct AivisGgmlEp final : OrtEp {
   AivisGgmlEp(
       const OrtApi& ort_api,
       const OrtEpApi& ep_api,
       const OrtLogger* logger,
       AivisGgmlEpConfig config,
-      std::unique_ptr<TtsCppRuntime> runtime)
+      std::shared_ptr<TtsCppRuntime> runtime)
       : OrtEp{},
         ort_api_{ort_api},
         ep_api_{ep_api},
@@ -1495,6 +2117,65 @@ struct AivisGgmlEp final : OrtEp {
     }
 
     try {
+      const EpContextGateResult ep_context_gate = MatchAivisGgmlEpContextGraph(graph);
+      if (ep_context_gate.supported) {
+        const bool wants_graph =
+            ep_context_gate.graph_kind == AivisGgmlGraphKind::Synthesis
+                ? ep->config_.claim_synthesis_graph
+                : ep->config_.claim_jp_bert_graph;
+        const bool has_runtime =
+            ep->runtime_ != nullptr &&
+            (ep_context_gate.graph_kind == AivisGgmlGraphKind::Synthesis
+                 ? ep->runtime_->HasSynthesisModel()
+                 : ep->runtime_->HasJpBertModel());
+        if (wants_graph && has_runtime) {
+          if (graph_support_info == nullptr) {
+            return CreateStatus(
+                ep->ort_api_,
+                ORT_INVALID_ARGUMENT,
+                "AivisGgmlExecutionProvider graph_support_info is null.");
+          }
+          const std::vector<Ort::ConstNode> nodes = Ort::ConstGraph{graph}.GetNodes();
+          std::vector<const OrtNode*> raw_nodes;
+          raw_nodes.reserve(nodes.size());
+          for (const Ort::ConstNode& node : nodes) {
+            raw_nodes.push_back(node);
+          }
+
+          OrtNodeFusionOptions fusion_options{};
+          fusion_options.ort_version_supported = ORT_API_VERSION;
+          fusion_options.drop_constant_initializers = true;
+          OrtStatus* status = ep->ep_api_.EpGraphSupportInfo_AddNodesToFuse(
+              graph_support_info,
+              raw_nodes.data(),
+              raw_nodes.size(),
+              &fusion_options);
+          if (status != nullptr) {
+            return status;
+          }
+          TraceMessage(
+              std::string("claimed Aivis GGML EPContext graph_kind=") +
+              GraphKindName(ep_context_gate.graph_kind));
+          LogMessage(
+              ep->ort_api_,
+              ep->logger_,
+              ORT_LOGGING_LEVEL_INFO,
+              std::string("AivisGgmlExecutionProvider claimed an EPContext graph. graph_kind=") +
+                  GraphKindName(ep_context_gate.graph_kind) + ", " +
+                  ConfigSummary(ep->config_));
+          return nullptr;
+        }
+        LogMessage(
+            ep->ort_api_,
+            ep->logger_,
+            ORT_LOGGING_LEVEL_INFO,
+            std::string("AivisGgmlExecutionProvider matched an EPContext graph, ")
+                + "but graph claiming or runtime readiness is disabled. graph_kind=" +
+                GraphKindName(ep_context_gate.graph_kind) + ", " +
+                ConfigSummary(ep->config_));
+        return nullptr;
+      }
+
       const GraphSignatureGateResult gate = MatchStyleBertVits2SynthesisGraph(graph);
       if (gate.supported) {
         const std::string runtime_state =
@@ -1614,14 +2295,16 @@ struct AivisGgmlEp final : OrtEp {
         }
         TraceMessage(
             "rejected graph: synthesis={" + JoinReasons(gate.reasons) +
-            "}; jp-bert={" + JoinReasons(jp_bert_gate.reasons) + "}");
+            "}; jp-bert={" + JoinReasons(jp_bert_gate.reasons) +
+            "}; ep-context={" + JoinReasons(ep_context_gate.reasons) + "}");
         LogMessage(
             ep->ort_api_,
             ep->logger_,
             ORT_LOGGING_LEVEL_VERBOSE,
             "AivisGgmlExecutionProvider rejected graph signatures and claimed no nodes: "
             "synthesis={" + JoinReasons(gate.reasons) + "}; jp-bert={" +
-                JoinReasons(jp_bert_gate.reasons) + "}");
+                JoinReasons(jp_bert_gate.reasons) + "}; ep-context={" +
+                JoinReasons(ep_context_gate.reasons) + "}");
       }
     } catch (const Ort::Exception& ex) {
       LogMessage(
@@ -1673,6 +2356,12 @@ struct AivisGgmlEp final : OrtEp {
           ORT_INVALID_ARGUMENT,
           "AivisGgmlExecutionProvider Compile received a null node_compute_infos array.");
     }
+    if (ep->config_.ort_ep_context_enable && ep_context_nodes == nullptr) {
+      return CreateStatus(
+          ep->ort_api_,
+          ORT_INVALID_ARGUMENT,
+          "AivisGgmlExecutionProvider Compile received a null ep_context_nodes array.");
+    }
 
     try {
       for (size_t i = 0; i < count; ++i) {
@@ -1683,6 +2372,7 @@ struct AivisGgmlEp final : OrtEp {
         AivisGgmlGraphKind graph_kind = AivisGgmlGraphKind::Synthesis;
         const GraphSignatureGateResult synthesis_gate = MatchStyleBertVits2SynthesisGraph(graphs[i]);
         const GraphSignatureGateResult jp_bert_gate = MatchStyleBertVits2JpBertGraph(graphs[i]);
+        const EpContextGateResult ep_context_gate = MatchAivisGgmlEpContextGraph(graphs[i]);
         std::vector<size_t> input_indices;
         size_t primary_output_index = 0;
         if (synthesis_gate.supported) {
@@ -1705,14 +2395,65 @@ struct AivisGgmlEp final : OrtEp {
           graph_kind = AivisGgmlGraphKind::JpBert;
           input_indices = BuildInputIndices(graphs[i], kExpectedJpBertInputNames);
           primary_output_index = BuildOutputIndex(graphs[i], kExpectedJpBertOutputName);
+        } else if (ep_context_gate.supported) {
+          if (ep->config_.ort_ep_context_enable) {
+            throw std::runtime_error("AivisGgmlExecutionProvider cannot generate an EPContext node from an EPContext graph.");
+          }
+          graph_kind = ep_context_gate.graph_kind;
+          if (graph_kind == AivisGgmlGraphKind::Synthesis) {
+            if (!ep->config_.claim_synthesis_graph) {
+              throw std::runtime_error("AivisGgmlExecutionProvider Compile received a synthesis EPContext graph while claim_synthesis_graph is disabled.");
+            }
+            if (ep->runtime_ == nullptr || !ep->runtime_->HasSynthesisModel()) {
+              throw std::runtime_error("AivisGgmlExecutionProvider Compile requires a loaded synthesis runtime for EPContext inference.");
+            }
+            input_indices = BuildInputIndices(graphs[i], kExpectedInputNames);
+            primary_output_index = BuildOutputIndex(graphs[i], kExpectedFirstOutputName);
+          } else {
+            if (!ep->config_.claim_jp_bert_graph) {
+              throw std::runtime_error("AivisGgmlExecutionProvider Compile received a JP-BERT EPContext graph while claim_jp_bert_graph is disabled.");
+            }
+            if (ep->runtime_ == nullptr || !ep->runtime_->HasJpBertModel()) {
+              throw std::runtime_error("AivisGgmlExecutionProvider Compile requires a loaded JP-BERT runtime for EPContext inference.");
+            }
+            input_indices = BuildInputIndices(graphs[i], kExpectedJpBertInputNames);
+            primary_output_index = BuildOutputIndex(graphs[i], kExpectedJpBertOutputName);
+          }
         } else {
           throw std::runtime_error(
               "AivisGgmlExecutionProvider Compile received an unsupported graph signature: synthesis={" +
-              JoinReasons(synthesis_gate.reasons) + "}; jp-bert={" + JoinReasons(jp_bert_gate.reasons) + "}");
+              JoinReasons(synthesis_gate.reasons) + "}; jp-bert={" +
+              JoinReasons(jp_bert_gate.reasons) + "}; ep-context={" +
+              JoinReasons(ep_context_gate.reasons) + "}");
+        }
+        if (ep->config_.ort_ep_context_enable) {
+          OrtStatus* status = CreateEpContextNode(
+              ep->ort_api_,
+              ep->config_,
+              graphs[i],
+              graph_kind,
+              i,
+              &ep_context_nodes[i]);
+          if (status != nullptr) {
+            for (size_t cleanup_index = 0; cleanup_index < count; ++cleanup_index) {
+              delete static_cast<AivisGgmlNodeComputeInfo*>(node_compute_infos[cleanup_index]);
+              node_compute_infos[cleanup_index] = nullptr;
+              if (ep_context_nodes[cleanup_index] != nullptr) {
+                ep->ort_api_.ReleaseNode(ep_context_nodes[cleanup_index]);
+                ep_context_nodes[cleanup_index] = nullptr;
+              }
+            }
+            return status;
+          }
+          TraceMessage(
+              std::string("created EPContext node graph_kind=") +
+              GraphKindName(graph_kind) +
+              " index=" + std::to_string(i));
+          continue;
         }
         node_compute_infos[i] = new AivisGgmlNodeComputeInfo(
             ep->ort_api_,
-            ep->runtime_.get(),
+            ep->runtime_,
             graph_kind,
             std::move(input_indices),
             primary_output_index);
@@ -1723,18 +2464,40 @@ struct AivisGgmlEp final : OrtEp {
       for (size_t i = 0; i < count; ++i) {
         delete static_cast<AivisGgmlNodeComputeInfo*>(node_compute_infos[i]);
         node_compute_infos[i] = nullptr;
+        if (ep_context_nodes != nullptr && ep_context_nodes[i] != nullptr) {
+          ep->ort_api_.ReleaseNode(ep_context_nodes[i]);
+          ep_context_nodes[i] = nullptr;
+        }
       }
       return CreateStatus(ep->ort_api_, ORT_FAIL, "Out of memory compiling Aivis GGML graph.");
+    } catch (const Ort::Exception& ex) {
+      for (size_t i = 0; i < count; ++i) {
+        delete static_cast<AivisGgmlNodeComputeInfo*>(node_compute_infos[i]);
+        node_compute_infos[i] = nullptr;
+        if (ep_context_nodes != nullptr && ep_context_nodes[i] != nullptr) {
+          ep->ort_api_.ReleaseNode(ep_context_nodes[i]);
+          ep_context_nodes[i] = nullptr;
+        }
+      }
+      return CreateStatus(ep->ort_api_, ORT_FAIL, ex.what());
     } catch (const std::exception& ex) {
       for (size_t i = 0; i < count; ++i) {
         delete static_cast<AivisGgmlNodeComputeInfo*>(node_compute_infos[i]);
         node_compute_infos[i] = nullptr;
+        if (ep_context_nodes != nullptr && ep_context_nodes[i] != nullptr) {
+          ep->ort_api_.ReleaseNode(ep_context_nodes[i]);
+          ep_context_nodes[i] = nullptr;
+        }
       }
       return CreateStatus(ep->ort_api_, ORT_FAIL, ex.what());
     } catch (...) {
       for (size_t i = 0; i < count; ++i) {
         delete static_cast<AivisGgmlNodeComputeInfo*>(node_compute_infos[i]);
         node_compute_infos[i] = nullptr;
+        if (ep_context_nodes != nullptr && ep_context_nodes[i] != nullptr) {
+          ep->ort_api_.ReleaseNode(ep_context_nodes[i]);
+          ep_context_nodes[i] = nullptr;
+        }
       }
       return CreateStatus(ep->ort_api_, ORT_FAIL, "Unknown error compiling Aivis GGML graph.");
     }
@@ -1757,7 +2520,7 @@ struct AivisGgmlEp final : OrtEp {
   const OrtEpApi& ep_api_;
   const OrtLogger* logger_;
   AivisGgmlEpConfig config_;
-  std::unique_ptr<TtsCppRuntime> runtime_;
+  std::shared_ptr<TtsCppRuntime> runtime_;
 };
 
 struct AivisGgmlEpFactory final : OrtEpFactory {
@@ -1839,6 +2602,10 @@ struct AivisGgmlEpFactory final : OrtEpFactory {
       factory->ort_api_.CreateKeyValuePairs(&ep_options);
 
       factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.stage", kStage);
+      factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.runtime_registry_contract", kRuntimeRegistryContract);
+      factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.tts_cpp_runtime_contract", kTtsCppRuntimeContract);
+      factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.official_ep_context", "generation_supported");
+      factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.official_ep_context_inference", "provider_options_required");
       factory->ort_api_.AddKeyValuePair(ep_metadata, "registration_name", factory->registration_name_.c_str());
       factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.supported_backends", "vulkan,metal,cpu");
       factory->ort_api_.AddKeyValuePair(ep_metadata, "aivis.supported_precision", "accurate,fast");
@@ -1900,15 +2667,21 @@ struct AivisGgmlEpFactory final : OrtEpFactory {
       if (status != nullptr) {
         return status;
       }
-      std::unique_ptr<TtsCppRuntime> runtime;
+      std::shared_ptr<TtsCppRuntime> runtime;
       if (config.eager_load_model) {
-        runtime = TtsCppRuntime::LoadAndMaybeOpenModel(config);
-        TraceMessage("eager-loaded TTS.cpp GGUF model(s)");
+        bool reused_runtime = false;
+        runtime = TtsCppRuntimeRegistry::Acquire(config, reused_runtime);
+        TraceMessage(
+            std::string(reused_runtime ? "reused" : "eager-loaded") +
+            " TTS.cpp GGUF runtime");
         LogMessage(
             factory->ort_api_,
             ep_logger,
             ORT_LOGGING_LEVEL_INFO,
-            "AivisGgmlExecutionProvider eagerly loaded configured TTS.cpp GGUF model(s).");
+            std::string("AivisGgmlExecutionProvider ") +
+                (reused_runtime ? "reused" : "eagerly loaded") +
+                " configured TTS.cpp GGUF runtime. " +
+                runtime->ContractSummary() + ".");
       }
       LogMessage(
           factory->ort_api_,

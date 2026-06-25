@@ -72,6 +72,119 @@ def test_supported_style_bert_vits2_synthesis_signature_matches(
     assert match.reasons == ()
 
 
+def test_signature_contract_identifies_supported_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The manifest contract records a stable supported synthesis identity."""
+
+    _add_external_package_src(monkeypatch)
+
+    from onnxruntime_ep_aivis_ggml.signature import (
+        SIGNATURE_CONTRACT_VERSION,
+        SUPPORTED_STYLE_BERT_VITS2_SYNTHESIS,
+        OnnxGraphSignature,
+        TensorSignature,
+        build_signature_contract,
+        signature_structural_sha256,
+    )
+
+    expected = SUPPORTED_STYLE_BERT_VITS2_SYNTHESIS
+    signature = OnnxGraphSignature(
+        ir_version=expected["ir_version"],
+        producer_name="pytorch",
+        producer_version="2.8.0",
+        graph_name=expected["graph_name"],
+        opsets=expected["opsets"],
+        inputs=tuple(
+            TensorSignature(name=name, elem_type=elem_type, shape=())
+            for name, elem_type in zip(
+                expected["input_names"],
+                expected["input_elem_types"],
+                strict=True,
+            )
+        ),
+        outputs=(
+            TensorSignature(
+                name=expected["first_output_name"],
+                elem_type="FLOAT",
+                shape=(),
+            ),
+            *(
+                TensorSignature(name=f"debug_{index}", elem_type="FLOAT", shape=())
+                for index in range(expected["output_count"] - 1)
+            ),
+        ),
+        node_count=expected["node_count"],
+        initializer_count=expected["initializer_count"],
+        op_counts=(("Conv", 1),),
+        op_sequence_sha256=expected["op_sequence_sha256"],
+        initializer_names_sha256=expected["initializer_names_sha256"],
+        metadata_model_architecture="Style-Bert-VITS2",
+        metadata_model_format="ONNX",
+    )
+
+    contract = build_signature_contract(signature)
+
+    assert contract["version"] == SIGNATURE_CONTRACT_VERSION
+    assert contract["graph_kind"] == "style_bert_vits2_synthesis"
+    assert contract["supported"] is True
+    assert contract["structural_sha256"] == signature_structural_sha256(signature)
+    assert len(contract["structural_sha256"]) == 64
+
+
+def test_supported_style_bert_vits2_jp_bert_signature_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The JP-BERT ONNX contract is explicitly modeled in Python too."""
+
+    _add_external_package_src(monkeypatch)
+
+    from onnxruntime_ep_aivis_ggml.signature import (
+        SUPPORTED_STYLE_BERT_VITS2_JP_BERT,
+        OnnxGraphSignature,
+        TensorSignature,
+        build_signature_contract,
+        match_supported_style_bert_vits2_jp_bert,
+    )
+
+    expected = SUPPORTED_STYLE_BERT_VITS2_JP_BERT
+    signature = OnnxGraphSignature(
+        ir_version=expected["ir_version"],
+        producer_name="pytorch",
+        producer_version="2.8.0",
+        graph_name="main_graph",
+        opsets=expected["opsets"],
+        inputs=tuple(
+            TensorSignature(name=name, elem_type=elem_type, shape=(1, "tokens"))
+            for name, elem_type in zip(
+                expected["input_names"],
+                expected["input_elem_types"],
+                strict=True,
+            )
+        ),
+        outputs=(
+            TensorSignature(
+                name=expected["output_name"],
+                elem_type=expected["output_elem_type"],
+                shape=("tokens", 1024),
+            ),
+        ),
+        node_count=expected["node_counts"][0],
+        initializer_count=expected["initializer_counts"][0],
+        op_counts=tuple((op_type, 1) for op_type in expected["required_op_types"]),
+        op_sequence_sha256="1" * 64,
+        initializer_names_sha256="2" * 64,
+    )
+
+    match = match_supported_style_bert_vits2_jp_bert(signature)
+    contract = build_signature_contract(signature)
+
+    assert match.supported is True
+    assert match.reasons == ()
+    assert contract["graph_kind"] == "style_bert_vits2_jp_bert"
+    assert contract["supported"] is True
+
+
 def test_identity_model_signature_is_not_supported(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

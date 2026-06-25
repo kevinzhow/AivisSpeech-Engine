@@ -114,6 +114,37 @@ def test_prepare_ggml_cache_writes_portable_manifest(
         "backend": "vulkan",
         "precision": "accurate",
     }
+    assert plan.manifest["signature_contract"]["version"] == (
+        "aivis-ggml-signature-contract-v1"
+    )
+    assert plan.manifest["signature_contract"]["graph_kind"] == (
+        "style_bert_vits2_synthesis"
+    )
+    assert plan.manifest["runtime_contract"]["version"] == (
+        "aivis-ggml-runtime-registry-v1"
+    )
+    assert plan.manifest["runtime_contract"]["provider_name"] == (
+        "AivisGgmlExecutionProvider"
+    )
+    assert plan.manifest["compatibility_matrix"]["version"] == (
+        "aivis-ggml-compatibility-matrix-v1"
+    )
+    assert plan.manifest["compatibility_matrix"]["onnxruntime"] == {
+        "plugin_ep_api_version": 26,
+        "requires_model_editor_api": True,
+        "tested_runtime_version": "1.26.0",
+    }
+    assert (
+        "tts_style_bert_vits2_synthesize_front_with_style_vec"
+        in plan.manifest["runtime_contract"]["required_tts_cpp_symbols"]
+    )
+    assert plan.manifest["ep_context"]["version"] == (
+        "aivis-ggml-ep-context-lite-v1"
+    )
+    assert plan.manifest["ep_context"]["official_ort_ep_context"] == {
+        "enabled": False,
+        "status": "manifest_only",
+    }
     assert plan.manifest["converter"]["state"] == "not_implemented"
     assert plan.manifest["converter"]["readiness"] == {
         "can_write_gguf": False,
@@ -122,6 +153,48 @@ def test_prepare_ggml_cache_writes_portable_manifest(
             "tts_cpp_tensor_mapping_missing",
             "missing_external_source:style_bert_vits2_config",
         ),
+    }
+
+
+def test_validate_cache_manifest_checks_contracts_and_portable_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Manifest validation catches readiness and non-portable artifact drift."""
+
+    signature = _supported_signature(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cache
+    from onnxruntime_ep_aivis_ggml.signature import SignatureMatch
+
+    model_path = tmp_path / "model.aivmx"
+    model_path.write_bytes(b"fake onnx bytes")
+    monkeypatch.setattr(cache, "load_onnx_graph_signature", lambda _path: signature)
+    monkeypatch.setattr(
+        cache,
+        "match_supported_style_bert_vits2_synthesis",
+        lambda _signature: SignatureMatch(supported=True, reasons=()),
+    )
+
+    plan = cache.prepare_ggml_cache(
+        model_path=model_path,
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert cache.validate_cache_manifest(plan.manifest) == ()
+    assert cache.validate_cache_manifest(plan.manifest, require_ready=True) == (
+        "status_not_ready",
+    )
+
+    manifest_with_absolute_artifact = dict(plan.manifest)
+    manifest_with_absolute_artifact["artifacts"] = {
+        **plan.manifest["artifacts"],
+        "gguf": str(tmp_path / "model.gguf"),
+        "debug": "../debug.bin",
+    }
+
+    assert set(cache.validate_cache_manifest(manifest_with_absolute_artifact)) == {
+        "artifact_path_not_portable:gguf",
+        "artifact_path_not_portable:debug",
     }
 
 
@@ -351,6 +424,35 @@ def test_prepare_ggml_cache_write_gguf_rejects_incomplete_readiness(
         )
 
     assert not any((tmp_path / "cache").glob("*/model.gguf"))
+
+
+def test_prepare_ggml_cache_write_gguf_requires_real_converter_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Written GGUF artifacts must not be labeled with the bootstrap version."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml.cache import prepare_ggml_cache
+
+    model_path = tmp_path / "model.aivmx"
+    config_path = tmp_path / "config.json"
+    style_vectors_path = tmp_path / "style_vectors.npy"
+    model_path.write_bytes(b"fake onnx bytes")
+    config_path.write_text("{}", encoding="utf-8")
+    np.save(style_vectors_path, np.array([[0.0]], dtype=np.float32))
+
+    with pytest.raises(ValueError, match="real converter_version"):
+        prepare_ggml_cache(
+            model_path=model_path,
+            cache_dir=tmp_path / "cache",
+            config_path=config_path,
+            style_vectors_path=style_vectors_path,
+            converter_version="unimplemented",
+            write_tensor_pack=True,
+            write_gguf=True,
+            allow_unsupported=True,
+        )
 
 
 def test_prepare_ggml_cache_can_write_gguf_with_ready_plan(

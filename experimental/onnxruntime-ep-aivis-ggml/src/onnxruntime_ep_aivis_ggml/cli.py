@@ -110,7 +110,9 @@ def inspect_model_signature_main() -> None:
     """Print a JSON graph signature and supported-match result."""
 
     from onnxruntime_ep_aivis_ggml.signature import (
+        build_signature_contract,
         load_onnx_graph_signature,
+        match_supported_style_bert_vits2_jp_bert,
         match_supported_style_bert_vits2_synthesis,
     )
 
@@ -124,12 +126,17 @@ def inspect_model_signature_main() -> None:
     args = parser.parse_args()
 
     signature = load_onnx_graph_signature(args.model_path)
-    match = match_supported_style_bert_vits2_synthesis(signature)
+    synthesis_match = match_supported_style_bert_vits2_synthesis(signature)
+    jp_bert_match = match_supported_style_bert_vits2_jp_bert(signature)
     print(
         json.dumps(
             {
                 "signature": signature.to_dict(),
-                "match": match.to_dict(),
+                "signature_contract": build_signature_contract(signature),
+                "matches": {
+                    "style_bert_vits2_synthesis": synthesis_match.to_dict(),
+                    "style_bert_vits2_jp_bert": jp_bert_match.to_dict(),
+                },
             },
             ensure_ascii=False,
             indent=2,
@@ -137,14 +144,19 @@ def inspect_model_signature_main() -> None:
         )
     )
 
-    if args.fail_if_unsupported and not match.supported:
+    if args.fail_if_unsupported and not (
+        synthesis_match.supported or jp_bert_match.supported
+    ):
         raise SystemExit(1)
 
 
 def prepare_cache_main() -> None:
     """Prepare a deterministic GGML cache manifest for a supported ONNX graph."""
 
-    from onnxruntime_ep_aivis_ggml.cache import prepare_ggml_cache
+    from onnxruntime_ep_aivis_ggml.cache import (
+        DEFAULT_CONVERTER_VERSION,
+        prepare_ggml_cache,
+    )
 
     parser = argparse.ArgumentParser()
     parser.add_argument("model_path", type=Path)
@@ -165,7 +177,7 @@ def prepare_cache_main() -> None:
     parser.add_argument("--precision", default="accurate", choices=("accurate", "fast"))
     parser.add_argument(
         "--converter-version",
-        default="unimplemented",
+        default=DEFAULT_CONVERTER_VERSION,
         help="Converter implementation version included in the cache key.",
     )
     parser.add_argument(
@@ -208,3 +220,41 @@ def prepare_cache_main() -> None:
         fail_on_unsupported_mapping=args.fail_on_unsupported_mapping,
     )
     print(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def validate_cache_main() -> None:
+    """Validate a prepared GGML cache manifest before provider deployment."""
+
+    from onnxruntime_ep_aivis_ggml.cache import (
+        load_cache_manifest,
+        validate_cache_manifest,
+    )
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("manifest_path", type=Path)
+    parser.add_argument(
+        "--require-ready",
+        action="store_true",
+        help="Fail unless the manifest status is ready.",
+    )
+    args = parser.parse_args()
+
+    manifest = load_cache_manifest(args.manifest_path)
+    errors = validate_cache_manifest(
+        manifest,
+        require_ready=args.require_ready,
+    )
+    print(
+        json.dumps(
+            {
+                "manifest_path": str(args.manifest_path),
+                "valid": len(errors) == 0,
+                "errors": errors,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if errors:
+        raise SystemExit(1)

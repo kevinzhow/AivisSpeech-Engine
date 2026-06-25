@@ -9,6 +9,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+SIGNATURE_CONTRACT_VERSION = "aivis-ggml-signature-contract-v1"
+
 
 @dataclass(frozen=True)
 class TensorSignature:
@@ -102,6 +104,24 @@ SUPPORTED_STYLE_BERT_VITS2_SYNTHESIS = {
         "Style-Bert-VITS2 (JP-Extra)",
     ),
     "metadata_model_format": "ONNX",
+}
+
+SUPPORTED_STYLE_BERT_VITS2_JP_BERT = {
+    "ir_version": 8,
+    "opsets": (("", 17),),
+    "input_names": ("input_ids", "attention_mask"),
+    "input_elem_types": ("INT64", "INT64"),
+    "output_name": "output",
+    "output_elem_type": "FLOAT",
+    "node_counts": (3619, 3092, 3180),
+    "initializer_counts": (432, 521, 543),
+    "required_op_types": (
+        "Gather",
+        "LayerNormalization",
+        "MatMul",
+        "Reshape",
+        "Where",
+    ),
 }
 
 
@@ -206,6 +226,120 @@ def match_supported_style_bert_vits2_synthesis(
         reasons.append(f"metadata model_format {model_format!r} != {expected_format!r}")
 
     return SignatureMatch(supported=len(reasons) == 0, reasons=tuple(reasons))
+
+
+def match_supported_style_bert_vits2_jp_bert(
+    signature: OnnxGraphSignature,
+) -> SignatureMatch:
+    """Check whether the graph matches the supported JP-BERT ONNX contract."""
+
+    expected = SUPPORTED_STYLE_BERT_VITS2_JP_BERT
+    reasons: list[str] = []
+
+    if signature.ir_version != expected["ir_version"]:
+        reasons.append(
+            f"ir_version {signature.ir_version} != {expected['ir_version']}"
+        )
+    if signature.opsets != expected["opsets"]:
+        reasons.append(f"opsets {signature.opsets} != {expected['opsets']}")
+
+    input_names = tuple(input_signature.name for input_signature in signature.inputs)
+    if input_names != expected["input_names"]:
+        reasons.append("input names do not match Style-Bert-VITS2 JP-BERT")
+
+    input_elem_types = tuple(
+        input_signature.elem_type for input_signature in signature.inputs
+    )
+    if input_elem_types != expected["input_elem_types"]:
+        reasons.append("input element types do not match Style-Bert-VITS2 JP-BERT")
+
+    if len(signature.outputs) != 1:
+        reasons.append(f"output_count {len(signature.outputs)} != 1")
+    elif signature.outputs[0].name != expected["output_name"]:
+        reasons.append(
+            f"output {signature.outputs[0].name!r} != {expected['output_name']!r}"
+        )
+    elif signature.outputs[0].elem_type != expected["output_elem_type"]:
+        reasons.append(
+            f"output element type {signature.outputs[0].elem_type!r} "
+            f"!= {expected['output_elem_type']!r}"
+        )
+
+    if signature.node_count not in expected["node_counts"]:
+        reasons.append(f"node_count {signature.node_count} is not accepted")
+    if signature.initializer_count not in expected["initializer_counts"]:
+        reasons.append(
+            f"initializer_count {signature.initializer_count} is not accepted"
+        )
+
+    op_types = {op_type for op_type, _count in signature.op_counts}
+    for required_op_type in expected["required_op_types"]:
+        if required_op_type not in op_types:
+            reasons.append(f"required op type {required_op_type!r} is missing")
+
+    return SignatureMatch(supported=len(reasons) == 0, reasons=tuple(reasons))
+
+
+def signature_structural_sha256(signature: OnnxGraphSignature) -> str:
+    """Hash the stable structural fields that form the provider contract."""
+
+    payload = {
+        "version": SIGNATURE_CONTRACT_VERSION,
+        "ir_version": signature.ir_version,
+        "graph_name": signature.graph_name,
+        "opsets": signature.opsets,
+        "inputs": tuple(input_signature for input_signature in signature.inputs),
+        "outputs": tuple(output_signature for output_signature in signature.outputs),
+        "node_count": signature.node_count,
+        "initializer_count": signature.initializer_count,
+        "op_counts": signature.op_counts,
+        "op_sequence_sha256": signature.op_sequence_sha256,
+        "initializer_names_sha256": signature.initializer_names_sha256,
+        "metadata_model_architecture": signature.metadata_model_architecture,
+        "metadata_model_format": signature.metadata_model_format,
+    }
+    raw = json.dumps(
+        payload,
+        default=asdict,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return sha256(raw.encode()).hexdigest()
+
+
+def build_signature_contract(signature: OnnxGraphSignature) -> dict[str, Any]:
+    """Return the versioned graph contract used by cache manifests."""
+
+    synthesis_match = match_supported_style_bert_vits2_synthesis(signature)
+    jp_bert_match = match_supported_style_bert_vits2_jp_bert(signature)
+    if synthesis_match.supported:
+        graph_kind = "style_bert_vits2_synthesis"
+        match = synthesis_match
+    elif jp_bert_match.supported:
+        graph_kind = "style_bert_vits2_jp_bert"
+        match = jp_bert_match
+    else:
+        graph_kind = "unsupported"
+        match = SignatureMatch(
+            supported=False,
+            reasons=(
+                "synthesis={" + "; ".join(synthesis_match.reasons) + "}",
+                "jp_bert={" + "; ".join(jp_bert_match.reasons) + "}",
+            ),
+        )
+
+    return {
+        "version": SIGNATURE_CONTRACT_VERSION,
+        "graph_kind": graph_kind,
+        "supported": match.supported,
+        "reasons": match.reasons,
+        "structural_sha256": signature_structural_sha256(signature),
+        "op_sequence_sha256": signature.op_sequence_sha256,
+        "initializer_names_sha256": signature.initializer_names_sha256,
+        "node_count": signature.node_count,
+        "initializer_count": signature.initializer_count,
+    }
 
 
 def _tensor_signature(onnx_module: Any, value_info: Any) -> TensorSignature:

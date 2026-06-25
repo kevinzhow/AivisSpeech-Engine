@@ -199,3 +199,79 @@ Compile rules:
   `AivisGgmlExecutionProvider` and returns `[tokens, 1024]` features.
 - Short, medium, and long synthesis outputs are compared against ONNX CPU for
   sample count, max absolute difference, RMSE, SNR, and RTF.
+
+## Production Hardening Stages
+
+These stages continue from the first implementation route above. They are
+intended to make the Plugin EP production-safe without moving TTS.cpp-specific
+logic back into AivisSpeech Engine.
+
+1. Runtime registry and ABI gate.
+   - Status: implemented in the native Plugin EP.
+   - Identical `tts_cpp_library_path`, backend, device, precision, thread
+     count, `gguf_path`, and `jp_bert_gguf_path` combinations share a
+     process-local TTS.cpp runtime through a weak registry.
+   - Fused compute info holds a shared runtime reference, so the runtime stays
+     alive until ORT releases the compiled compute path.
+   - Required TTS.cpp C API symbols are resolved before graph claim. Optional
+     TTS.cpp runtime ABI and GGUF schema version symbols are enforced when a
+     newer TTS.cpp build exports them.
+
+2. Signature contract.
+   - Status: implemented in cache tooling and the signature inspector.
+   - The Python inspector emits `aivis-ggml-signature-contract-v1`, a stable
+     structural hash, synthesis match status, and JP-BERT match status.
+   - The cache key includes the structural signature hash in addition to source
+     hash, op-sequence hash, initializer-name hash, and converter version.
+   - Native `GetCapability()` still mirrors structural checks from the ORT graph
+     API because ORT may expose optimized fused graphs instead of the raw ONNX
+     file hash.
+
+3. EPContext-lite manifest.
+   - Status: implemented as portable manifest metadata.
+   - `manifest.json` records `aivis-ggml-ep-context-lite-v1`, provider name,
+     provider options, cache key, and relative artifact names. It does not
+     store local absolute paths.
+   - This is a deployment and cache contract only. It is intentionally marked as
+     `official_ort_ep_context.enabled=false` until the native EP creates real
+     ORT EPContext nodes.
+
+4. Official ONNX Runtime EPContext.
+   - Status: generation implemented, provider-option-based inference
+     implemented.
+   - Native `Compile()` honors ORT's `ep.context_enable` flow for supported
+     synthesis and JP-BERT graphs by returning `com.microsoft::EPContext` nodes
+     instead of `OrtNodeComputeInfo`.
+   - `ep.context_embed_mode=1` embeds an Aivis GGML JSON context payload in
+     `ep_cache_context`. `ep.context_embed_mode=0` writes that payload beside
+     `ep.context_file_path` and stores only a relative file name.
+   - Context payload artifact paths must stay relative to the generated context
+     model directory. If `cache_manifest_path`, `gguf_path`, or
+     `jp_bert_gguf_path` are outside that directory tree, context generation
+     fails instead of storing absolute local paths.
+   - Loading and executing precompiled EPContext models works when the
+     application still passes the matching TTS.cpp provider options and claim
+     flags. The provider claims `source=AivisGgmlExecutionProvider` EPContext
+     nodes and routes them through the existing synthesis/JP-BERT compute
+     bridge.
+   - The remaining production step is payload-driven lazy runtime restore, so a
+     context model can recover relative artifact paths without requiring the
+     same `gguf_path` and `jp_bert_gguf_path` provider options again.
+
+5. Offline compiler lifecycle and compatibility matrix.
+   - Status: partially implemented.
+   - A cache manifest validator now checks manifest version,
+     signature/runtime contracts, EPContext-lite metadata, optional ready
+     status, and portable relative artifact paths before deployment.
+   - Every cache manifest records an explicit compatibility matrix: provider
+     version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API
+     contract, GGUF schema expectation, synthesis/JP-BERT signature contracts,
+     and EPContext support level.
+   - Promote `prepare_cache --write-gguf` from a local helper to a versioned
+     offline compiler command with real-model fixture tests for synthesis GGUF
+     output, JP-BERT GGUF output, and EPContext round trips.
+   - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
+     TTS.cpp C API version, GGUF schema version, synthesis signature contract,
+     and JP-BERT signature contract.
+   - Keep unknown exports and incomplete mappings as hard failures before graph
+     claim. Do not silently fall back to partial GGUF generation.

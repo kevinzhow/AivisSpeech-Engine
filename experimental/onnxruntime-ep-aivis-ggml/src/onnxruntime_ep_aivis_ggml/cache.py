@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from onnxruntime_ep_aivis_ggml.gguf_writer import (
@@ -19,8 +19,10 @@ from onnxruntime_ep_aivis_ggml.initializer_pack import (
 from onnxruntime_ep_aivis_ggml.signature import (
     OnnxGraphSignature,
     SignatureMatch,
+    build_signature_contract,
     load_onnx_graph_signature,
     match_supported_style_bert_vits2_synthesis,
+    signature_structural_sha256,
 )
 from onnxruntime_ep_aivis_ggml.tts_cpp_mapping import (
     TensorMappingReport,
@@ -29,6 +31,28 @@ from onnxruntime_ep_aivis_ggml.tts_cpp_mapping import (
 )
 
 CACHE_MANIFEST_VERSION = "aivis-ggml-onnx-cache-v1"
+EP_CONTEXT_LITE_VERSION = "aivis-ggml-ep-context-lite-v1"
+RUNTIME_REGISTRY_CONTRACT = "aivis-ggml-runtime-registry-v1"
+TTS_CPP_RUNTIME_CONTRACT = "tts-style-bert-vits2-c-api-v1"
+COMPATIBILITY_MATRIX_VERSION = "aivis-ggml-compatibility-matrix-v1"
+PROVIDER_NAME = "AivisGgmlExecutionProvider"
+PROVIDER_VERSION = "0.1.0"
+DEFAULT_CONVERTER_VERSION = PROVIDER_VERSION
+
+REQUIRED_TTS_CPP_SYMBOLS = (
+    "tts_style_bert_vits2_last_error",
+    "tts_style_bert_vits2_load_model",
+    "tts_style_bert_vits2_free_model",
+    "tts_style_bert_vits2_jp_bert_load_model",
+    "tts_style_bert_vits2_jp_bert_free_model",
+    "tts_style_bert_vits2_synthesize_front",
+    "tts_style_bert_vits2_synthesize_front_with_style_vec",
+    "tts_style_bert_vits2_jp_bert_encode_features",
+)
+OPTIONAL_TTS_CPP_VERSION_SYMBOLS = (
+    "tts_style_bert_vits2_runtime_abi_version",
+    "tts_style_bert_vits2_gguf_schema_version",
+)
 
 
 @dataclass(frozen=True)
@@ -65,7 +89,7 @@ def prepare_ggml_cache(
     style_vectors_path: str | Path | None = None,
     backend: str = "vulkan",
     precision: str = "accurate",
-    converter_version: str = "unimplemented",
+    converter_version: str = DEFAULT_CONVERTER_VERSION,
     allow_unsupported: bool = False,
     write_tensor_pack: bool = False,
     write_gguf: bool = False,
@@ -79,6 +103,8 @@ def prepare_ggml_cache(
         raise ValueError("GGUF writing requires config_path.")
     if write_gguf and style_vectors_path is None:
         raise ValueError("GGUF writing requires style_vectors_path.")
+    if write_gguf and converter_version in {"", "unimplemented"}:
+        raise ValueError("GGUF writing requires a real converter_version.")
 
     source_path = Path(model_path)
     root_cache_dir = Path(cache_dir)
@@ -210,6 +236,7 @@ def build_cache_key(
         "opsets": signature.opsets,
         "op_sequence_sha256": signature.op_sequence_sha256,
         "initializer_names_sha256": signature.initializer_names_sha256,
+        "signature_structural_sha256": signature_structural_sha256(signature),
         "metadata_model_architecture": signature.metadata_model_architecture,
         "metadata_model_format": signature.metadata_model_format,
     }
@@ -241,6 +268,13 @@ def build_cache_manifest(
     }
     if initializer_pack is not None:
         artifacts["initializer_tensor_pack"] = "initializers.bin"
+    runtime_contract = build_runtime_contract()
+    ep_context = build_ep_context_lite(
+        cache_key=cache_key,
+        backend=backend,
+        precision=precision,
+        artifacts=artifacts,
+    )
 
     converter_readiness = build_converter_readiness(
         signature=signature,
@@ -258,7 +292,11 @@ def build_cache_manifest(
             "sha256": source_sha256,
         },
         "graph_signature": signature.to_dict(),
+        "signature_contract": build_signature_contract(signature),
         "match": match.to_dict(),
+        "runtime_contract": runtime_contract,
+        "compatibility_matrix": build_compatibility_matrix(),
+        "ep_context": ep_context,
         "converter": {
             "name": "onnxruntime-ep-aivis-ggml",
             "version": converter_version,
@@ -280,6 +318,185 @@ def build_cache_manifest(
     if gguf_write_result is not None:
         manifest["gguf_write"] = gguf_write_result.to_dict()
     return manifest
+
+
+def build_runtime_contract() -> dict[str, Any]:
+    """Return the portable TTS.cpp runtime contract required by native claim."""
+
+    return {
+        "version": RUNTIME_REGISTRY_CONTRACT,
+        "provider_name": PROVIDER_NAME,
+        "provider_version": PROVIDER_VERSION,
+        "tts_cpp_runtime_contract": TTS_CPP_RUNTIME_CONTRACT,
+        "required_tts_cpp_symbols": REQUIRED_TTS_CPP_SYMBOLS,
+        "optional_tts_cpp_version_symbols": OPTIONAL_TTS_CPP_VERSION_SYMBOLS,
+        "expected_optional_versions": {
+            "runtime_abi": 1,
+            "gguf_schema": 1,
+        },
+    }
+
+
+def build_compatibility_matrix() -> dict[str, Any]:
+    """Return the explicit deployment compatibility matrix for this artifact."""
+
+    return {
+        "version": COMPATIBILITY_MATRIX_VERSION,
+        "provider": {
+            "name": PROVIDER_NAME,
+            "version": PROVIDER_VERSION,
+        },
+        "onnxruntime": {
+            "tested_runtime_version": "1.26.0",
+            "plugin_ep_api_version": 26,
+            "requires_model_editor_api": True,
+        },
+        "runtime_contract": {
+            "registry": RUNTIME_REGISTRY_CONTRACT,
+            "tts_cpp_c_api": TTS_CPP_RUNTIME_CONTRACT,
+            "expected_optional_versions": {
+                "runtime_abi": 1,
+                "gguf_schema": 1,
+            },
+        },
+        "model_signature_contracts": {
+            "synthesis": "aivis-ggml-signature-contract-v1",
+            "jp_bert": "aivis-ggml-signature-contract-v1",
+        },
+        "ep_context": {
+            "lite_manifest": EP_CONTEXT_LITE_VERSION,
+            "official_node_generation": "supported",
+            "official_node_inference": "provider_options_required",
+        },
+    }
+
+
+def build_ep_context_lite(
+    *,
+    cache_key: str,
+    backend: str,
+    precision: str,
+    artifacts: dict[str, str],
+) -> dict[str, Any]:
+    """Describe the portable artifact layout before official ORT EPContext."""
+
+    return {
+        "version": EP_CONTEXT_LITE_VERSION,
+        "provider_name": PROVIDER_NAME,
+        "cache_key": cache_key,
+        "provider_options": {
+            "backend": backend,
+            "precision": precision,
+        },
+        "artifacts": dict(artifacts),
+        "portable": True,
+        "official_ort_ep_context": {
+            "enabled": False,
+            "status": "manifest_only",
+        },
+    }
+
+
+def validate_cache_manifest(
+    manifest: dict[str, Any],
+    *,
+    require_ready: bool = False,
+) -> tuple[str, ...]:
+    """Validate the portable manifest contract before provider deployment."""
+
+    errors: list[str] = []
+    if manifest.get("version") != CACHE_MANIFEST_VERSION:
+        errors.append("version_mismatch")
+
+    status = manifest.get("status")
+    if status not in {"planned", "ready"}:
+        errors.append("status_invalid")
+    if require_ready and status != "ready":
+        errors.append("status_not_ready")
+
+    signature_contract = manifest.get("signature_contract")
+    if not isinstance(signature_contract, dict):
+        errors.append("signature_contract_missing")
+    else:
+        if signature_contract.get("version") != "aivis-ggml-signature-contract-v1":
+            errors.append("signature_contract_version_mismatch")
+        structural_sha256 = signature_contract.get("structural_sha256")
+        if not isinstance(structural_sha256, str) or len(structural_sha256) != 64:
+            errors.append("signature_contract_structural_hash_invalid")
+
+    runtime_contract = manifest.get("runtime_contract")
+    if not isinstance(runtime_contract, dict):
+        errors.append("runtime_contract_missing")
+    else:
+        if runtime_contract.get("version") != RUNTIME_REGISTRY_CONTRACT:
+            errors.append("runtime_contract_version_mismatch")
+        if runtime_contract.get("provider_name") != PROVIDER_NAME:
+            errors.append("runtime_contract_provider_mismatch")
+        required_symbols = runtime_contract.get("required_tts_cpp_symbols")
+        if not isinstance(required_symbols, (list, tuple)):
+            errors.append("runtime_contract_required_symbols_invalid")
+        else:
+            missing_symbols = set(REQUIRED_TTS_CPP_SYMBOLS) - set(required_symbols)
+            if missing_symbols:
+                errors.append(
+                    "runtime_contract_required_symbols_missing:"
+                    + ",".join(sorted(missing_symbols))
+                )
+
+    ep_context = manifest.get("ep_context")
+    if not isinstance(ep_context, dict):
+        errors.append("ep_context_missing")
+    else:
+        if ep_context.get("version") != EP_CONTEXT_LITE_VERSION:
+            errors.append("ep_context_version_mismatch")
+        if ep_context.get("provider_name") != PROVIDER_NAME:
+            errors.append("ep_context_provider_mismatch")
+        official = ep_context.get("official_ort_ep_context")
+        if not isinstance(official, dict) or official.get("enabled") is not False:
+            errors.append("ep_context_official_status_invalid")
+
+    compatibility_matrix = manifest.get("compatibility_matrix")
+    if not isinstance(compatibility_matrix, dict):
+        errors.append("compatibility_matrix_missing")
+    else:
+        if compatibility_matrix.get("version") != COMPATIBILITY_MATRIX_VERSION:
+            errors.append("compatibility_matrix_version_mismatch")
+        provider = compatibility_matrix.get("provider")
+        if not isinstance(provider, dict) or provider.get("name") != PROVIDER_NAME:
+            errors.append("compatibility_matrix_provider_mismatch")
+        runtime_contract = compatibility_matrix.get("runtime_contract")
+        if not isinstance(runtime_contract, dict):
+            errors.append("compatibility_matrix_runtime_contract_missing")
+
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        errors.append("artifacts_missing")
+    else:
+        for name, relative_path in artifacts.items():
+            if not isinstance(relative_path, str) or relative_path == "":
+                errors.append(f"artifact_path_invalid:{name}")
+                continue
+            if _is_absolute_or_parent_relative(relative_path):
+                errors.append(f"artifact_path_not_portable:{name}")
+
+    return tuple(errors)
+
+
+def load_cache_manifest(path: str | Path) -> dict[str, Any]:
+    """Load a cache manifest from disk."""
+
+    manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("Cache manifest root must be a JSON object.")
+    return manifest
+
+
+def _is_absolute_or_parent_relative(value: str) -> bool:
+    posix_path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
+    if posix_path.is_absolute() or windows_path.is_absolute():
+        return True
+    return ".." in posix_path.parts or ".." in windows_path.parts
 
 
 def build_converter_readiness(
