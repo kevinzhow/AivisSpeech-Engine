@@ -60,6 +60,7 @@ jobs:
           PYTHONUTF8=1 uv run ruff check \
             experimental/onnxruntime-ep-aivis-ggml/src \
             experimental/onnxruntime-ep-aivis-ggml/tools \
+            test/unit/test_onnxruntime_ep_aivis_ggml_artifact_bundle.py \
             test/unit/test_onnxruntime_ep_aivis_ggml_cache.py \
             test/unit/test_onnxruntime_ep_aivis_ggml_jp_bert_gguf_writer.py \
             test/unit/test_onnxruntime_ep_aivis_ggml_package.py \
@@ -69,6 +70,7 @@ jobs:
         run: |
           uv run pytest \
             test/integration/test_onnxruntime_ep_aivis_ggml.py \
+            test/unit/test_onnxruntime_ep_aivis_ggml_artifact_bundle.py \
             test/unit/test_onnxruntime_ep_aivis_ggml_cache.py \
             test/unit/test_onnxruntime_ep_aivis_ggml_jp_bert_gguf_writer.py \
             test/unit/test_onnxruntime_ep_aivis_ggml_package.py \
@@ -138,6 +140,13 @@ jobs:
             tar -xf build/real-artifacts/bundle -C build/real-artifacts
           fi
           find build/real-artifacts -maxdepth 3 -type f | sort
+          validate_args=(build/real-artifacts)
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            validate_args+=(--require-manifest)
+          fi
+          PYTHONPATH=experimental/onnxruntime-ep-aivis-ggml/src \
+          uv run python experimental/onnxruntime-ep-aivis-ggml/tools/validate_artifact_bundle.py \
+            "${validate_args[@]}"
 
       - name: <Test> Run real-artifact compiler and EPContext matrix
         if: steps.real-artifacts.outputs.has_bundle == 'true'

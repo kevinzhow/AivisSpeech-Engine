@@ -23,6 +23,7 @@ aivis-ggml-onnx-ep-compile-jp-bert = "onnxruntime_ep_aivis_ggml.cli:compile_jp_b
 aivis-ggml-onnx-ep-inspect = "onnxruntime_ep_aivis_ggml.cli:inspect_model_signature_main"
 aivis-ggml-onnx-ep-prepare-cache = "onnxruntime_ep_aivis_ggml.cli:prepare_cache_main"
 aivis-ggml-onnx-ep-smoke-register = "onnxruntime_ep_aivis_ggml.cli:smoke_register_main"
+aivis-ggml-onnx-ep-validate-artifact-bundle = "onnxruntime_ep_aivis_ggml.cli:validate_artifact_bundle_main"
 aivis-ggml-onnx-ep-validate-cache = "onnxruntime_ep_aivis_ggml.cli:validate_cache_main"
 aivis-ggml-onnx-ep-validate-ep-context = "onnxruntime_ep_aivis_ggml.cli:validate_ep_context_payload_main"
 

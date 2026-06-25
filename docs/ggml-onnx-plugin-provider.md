@@ -301,22 +301,28 @@ logic back into AivisSpeech Engine.
      GGUF from ONNX initializers or a Hugging Face checkpoint directory and
      emits `compiled_model_compatibility_info` with `graph_kind=jp-bert` for
      ORT model-package metadata.
+   - `aivis-ggml-onnx-ep-validate-artifact-bundle` validates the hosted
+     real-artifact bundle before the matrix runs. Scheduled runs require
+     `aivis_ggml_ep_bundle.json`, which records provider version, ORT runtime
+     version/API, TTS.cpp runtime ABI, GGUF schema version, matrix id, and
+     portable artifact paths.
    - Hosted CI now has a dedicated `Test ONNX Runtime GGML EP` workflow. Push
      and pull request runs cover Python checks, default Plugin EP integration
      tests, native build, and native smoke registration. Manual dispatch and
      weekly scheduled runs can download a real-artifact bundle, run the
-     synthesis compiler, generate the JP-BERT GGUF from `jp_bert/model.onnx`
-     when the bundle does not already include `jp_bert/model.gguf`, run the
-     JP-BERT writer fixture, compare JP-BERT Plugin EP feature output against
-     ONNX CPU, and run the EPContext round-trip matrix.
+     artifact-bundle validator, run the synthesis compiler, generate the
+     JP-BERT GGUF from `jp_bert/model.onnx` when the bundle does not already
+     include `jp_bert/model.gguf`, run the JP-BERT writer fixture, compare
+     JP-BERT Plugin EP feature output against ONNX CPU, and run the EPContext
+     round-trip matrix.
    - The package now owns a TTS.cpp-compatible Style-Bert-VITS2 JP-BERT GGUF
      writer. It maps Hugging Face DeBERTa tensor names into TTS.cpp's compact
      JP-BERT tensor schema, writes the tokenizer/config metadata consumed by
      TTS.cpp, and fails before writing if any tensor that TTS.cpp will load is
      missing. It supports JP-BERT ONNX initializers and Hugging Face checkpoint
      directories (`model.safetensors` or `pytorch_model.bin`).
-   - Remaining production work: configure a pinned production artifact bundle
-     in repository secrets and expand the hosted real-artifact matrix across
+   - Remaining production work: configure the pinned production artifact bundle
+     URL/SHA secrets and add additional artifact bundle manifests for more
      ORT/TTS.cpp/GGUF schema versions.
    - Gate deployment on an explicit matrix: ORT API version, Plugin EP version,
      TTS.cpp C API version, GGUF schema version, synthesis signature contract,

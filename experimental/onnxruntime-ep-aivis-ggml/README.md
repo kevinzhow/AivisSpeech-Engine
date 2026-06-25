@@ -430,6 +430,14 @@ python tools/validate_ep_context_payload.py /path/to/context/model_aivis_ggml_sy
 aivis-ggml-onnx-ep-validate-ep-context /path/to/context/model_aivis_ggml_synthesis_0.json --graph-kind synthesis
 ```
 
+Validate a hosted real-artifact bundle before running the matrix:
+
+```bash
+python tools/validate_artifact_bundle.py /path/to/bundle/root --require-manifest
+# or, after installing the package:
+aivis-ggml-onnx-ep-validate-artifact-bundle /path/to/bundle/root --require-manifest
+```
+
 Run the opt-in real-artifact EPContext round-trip fixture:
 
 ```bash
@@ -495,6 +503,7 @@ matrix when given a bundle URL via the `artifact_bundle_url` input or the
 portable layout:
 
 ```text
+aivis_ggml_ep_bundle.json       # required for scheduled validation
 lib/libtts.so
 synthesis/model.aivmx
 synthesis/model.gguf
@@ -507,11 +516,41 @@ jp_bert/vocab.txt               # required when model.gguf must be generated
 jp_bert/tokenizer_config.json   # required when model.gguf must be generated
 ```
 
+The optional manifest is required on scheduled runs and may be omitted for
+manual legacy bundles. It records the real-artifact matrix without local paths:
+
+```json
+{
+  "artifacts": {
+    "lib_tts": "lib/libtts.so",
+    "synthesis_config": "synthesis/config.json",
+    "synthesis_gguf": "synthesis/model.gguf",
+    "synthesis_onnx": "synthesis/model.aivmx",
+    "synthesis_style_vectors": "synthesis/style_vectors.npy"
+  },
+  "matrix_id": "ort-1.26.0-tts-abi1-gguf1",
+  "onnxruntime": {
+    "plugin_ep_api_version": 26,
+    "tested_runtime_version": "1.26.0"
+  },
+  "provider": {
+    "name": "AivisGgmlExecutionProvider",
+    "version": "0.1.0"
+  },
+  "tts_cpp": {
+    "gguf_schema_version": 1,
+    "runtime_abi_version": 1
+  },
+  "version": "aivis-ggml-real-artifact-bundle-v1"
+}
+```
+
 The workflow builds the native Plugin EP against ONNX Runtime 1.26 headers,
-smoke-registers it, runs `compile_cache.py` with the synthesis files, generates
-`jp_bert/model.gguf` with `compile_jp_bert.py` when `jp_bert/model.onnx` is
-present and the GGUF is missing, runs the JP-BERT writer fixture when
-`jp_bert/model.onnx` is present, runs the JP-BERT ONNX CPU parity fixture when
-both JP-BERT ONNX and GGUF artifacts are present, and runs the EPContext
-round-trip fixture. The optional `artifact_bundle_sha256` input or
+smoke-registers it, validates the real-artifact bundle, runs `compile_cache.py`
+with the synthesis files, generates `jp_bert/model.gguf` with
+`compile_jp_bert.py` when `jp_bert/model.onnx` is present and the GGUF is
+missing, runs the JP-BERT writer fixture when `jp_bert/model.onnx` is present,
+runs the JP-BERT ONNX CPU parity fixture when both JP-BERT ONNX and GGUF
+artifacts are present, and runs the EPContext round-trip fixture. The optional
+`artifact_bundle_sha256` input or
 `AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` secret pins the downloaded bundle.

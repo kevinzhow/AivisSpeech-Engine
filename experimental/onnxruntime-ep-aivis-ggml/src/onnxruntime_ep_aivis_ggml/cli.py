@@ -455,3 +455,28 @@ def validate_ep_context_payload_main() -> None:
     )
     if errors:
         raise SystemExit(1)
+
+
+def validate_artifact_bundle_main() -> None:
+    """Validate a real-artifact bundle before hosted Plugin EP tests."""
+
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        build_real_artifact_bundle_report,
+    )
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("bundle_dir", type=Path)
+    parser.add_argument(
+        "--require-manifest",
+        action="store_true",
+        help="Fail when aivis_ggml_ep_bundle.json is missing.",
+    )
+    args = parser.parse_args()
+
+    report = build_real_artifact_bundle_report(
+        args.bundle_dir,
+        require_manifest=args.require_manifest,
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    if report["errors"]:
+        raise SystemExit(1)
