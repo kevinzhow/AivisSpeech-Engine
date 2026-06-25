@@ -110,7 +110,12 @@ This directory currently provides:
 - A deployment compatibility matrix in every manifest. It records the provider
   version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API contract,
   GGUF schema expectation, signature contract versions, and official
-  EPContext support level and payload version.
+  EPContext support level, payload version, and compiled-model compatibility
+  contract.
+- Native ORT compiled-model compatibility callbacks. `GetCompiledModelCompatibilityInfo()`
+  returns a portable JSON contract for package metadata, and
+  `ValidateCompiledModelCompatibilityInfo()` lets ORT score model-package
+  variants as optimal, prefer-recompile, unsupported, or not-applicable.
 - A native TTS.cpp binding readiness gate. With `eager_load_model=1`,
   `CreateEp()` dlopens `tts_cpp_library_path`, resolves the Style-Bert-VITS2
   and JP-BERT C API symbols, and loads configured GGUF paths. This keeps
@@ -227,9 +232,15 @@ manifests.
    `prepare_cache --write-gguf`. The manifest also records an explicit
    compatibility matrix covering ORT Plugin EP API version, TTS.cpp C API
    contract, GGUF schema expectation, model signature contracts, EPContext
-   support level, and EPContext payload version. Remaining work is moving these
-   fixtures into a hosted artifact CI matrix and adding a package-owned JP-BERT
-   GGUF writer instead of requiring an external JP-BERT GGUF input.
+   support level, EPContext payload version, and the compiled-model
+   compatibility contract used by ORT model package selection. The native EP
+   also implements ORT's compiled-model compatibility callbacks: exact
+   provider/runtime/signature/GGUF contract matches return optimal, ORT API
+   version drift returns prefer-recompile, unrelated EP metadata is
+   not-applicable, and Aivis contract drift is unsupported. Remaining work is
+   moving these fixtures into a hosted artifact CI matrix and adding a
+   package-owned JP-BERT GGUF writer instead of requiring an external JP-BERT
+   GGUF input.
 
 ## Native Build
 

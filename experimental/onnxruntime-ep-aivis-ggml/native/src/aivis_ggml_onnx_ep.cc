@@ -47,6 +47,9 @@ constexpr const char* kVersion = "0.1.0";
 constexpr const char* kStage = "synthesis-jp-bert-bridge";
 constexpr const char* kRuntimeRegistryContract = "aivis-ggml-runtime-registry-v1";
 constexpr const char* kTtsCppRuntimeContract = "tts-style-bert-vits2-c-api-v1";
+constexpr const char* kSignatureContract = "aivis-ggml-signature-contract-v1";
+constexpr const char* kOfficialEpContextVersion = "aivis-ggml-official-ep-context-v1";
+constexpr const char* kCompiledModelCompatibilityVersion = "aivis-ggml-compiled-model-compatibility-v1";
 constexpr uint32_t kExpectedTtsCppRuntimeAbiVersion = 1;
 constexpr uint32_t kExpectedTtsCppGgufSchemaVersion = 1;
 constexpr int64_t kExpectedIrVersion = 8;
@@ -1174,7 +1177,7 @@ std::string BuildEpContextPayload(
   Ort::ConstGraph graph{ort_graph};
   std::ostringstream out;
   out << "{";
-  out << "\"version\":\"aivis-ggml-official-ep-context-v1\"";
+  out << "\"version\":\"" << kOfficialEpContextVersion << "\"";
   out << ",\"provider_name\":\"" << kEpName << "\"";
   out << ",\"provider_version\":\"" << kVersion << "\"";
   out << ",\"runtime_registry_contract\":\"" << kRuntimeRegistryContract << "\"";
@@ -1397,7 +1400,7 @@ OrtStatus* CreateEpContextNode(
       status = AddStringOpAttr(api, attributes, "hardware_architecture", hardware_architecture);
     }
     if (status == nullptr) {
-      status = AddStringOpAttr(api, attributes, "notes", "aivis-ggml-official-ep-context-v1");
+      status = AddStringOpAttr(api, attributes, "notes", kOfficialEpContextVersion);
     }
     if (status != nullptr) {
       ReleaseOpAttrs(api, attributes);
@@ -2213,11 +2216,22 @@ EpContextPayload ParseEpContextPayload(
   const std::string payload = ReadEpContextPayloadText(config, ort_graph, node);
   std::string value;
   if (!ExtractJsonStringField(payload, "version", value) ||
-      value != "aivis-ggml-official-ep-context-v1") {
+      value != kOfficialEpContextVersion) {
     throw std::runtime_error("EPContext payload version is unsupported.");
   }
   if (!ExtractJsonStringField(payload, "provider_name", value) || value != kEpName) {
     throw std::runtime_error("EPContext payload provider_name is unsupported.");
+  }
+  if (!ExtractJsonStringField(payload, "provider_version", value) || value != kVersion) {
+    throw std::runtime_error("EPContext payload provider_version is unsupported.");
+  }
+  if (!ExtractJsonStringField(payload, "runtime_registry_contract", value) ||
+      value != kRuntimeRegistryContract) {
+    throw std::runtime_error("EPContext payload runtime_registry_contract is unsupported.");
+  }
+  if (!ExtractJsonStringField(payload, "tts_cpp_runtime_contract", value) ||
+      value != kTtsCppRuntimeContract) {
+    throw std::runtime_error("EPContext payload tts_cpp_runtime_contract is unsupported.");
   }
   if (!ExtractJsonStringField(payload, "graph_kind", value)) {
     throw std::runtime_error("EPContext payload graph_kind is missing.");
@@ -2413,6 +2427,152 @@ EpContextGateResult MatchAivisGgmlEpContextGraph(const OrtGraph* ort_graph) {
   return result;
 }
 
+std::string DetectCompiledModelGraphKind(const OrtGraph* ort_graph) {
+  if (ort_graph == nullptr) {
+    return "unsupported";
+  }
+
+  const EpContextGateResult ep_context_gate = MatchAivisGgmlEpContextGraph(ort_graph);
+  if (ep_context_gate.supported) {
+    return GraphKindName(ep_context_gate.graph_kind);
+  }
+
+  const GraphSignatureGateResult synthesis_gate =
+      MatchStyleBertVits2SynthesisGraph(ort_graph);
+  if (synthesis_gate.supported) {
+    return GraphKindName(AivisGgmlGraphKind::Synthesis);
+  }
+
+  const GraphSignatureGateResult jp_bert_gate =
+      MatchStyleBertVits2JpBertGraph(ort_graph);
+  if (jp_bert_gate.supported) {
+    return GraphKindName(AivisGgmlGraphKind::JpBert);
+  }
+
+  return "unsupported";
+}
+
+std::string BuildCompiledModelCompatibilityInfo(
+    const AivisGgmlEpConfig& config,
+    const OrtGraph* ort_graph) {
+  std::ostringstream out;
+  out << "{";
+  out << "\"version\":\"" << kCompiledModelCompatibilityVersion << "\"";
+  out << ",\"provider_name\":\"" << kEpName << "\"";
+  out << ",\"provider_version\":\"" << kVersion << "\"";
+  out << ",\"ort_api_version\":" << ORT_API_VERSION;
+  out << ",\"runtime_registry_contract\":\"" << kRuntimeRegistryContract << "\"";
+  out << ",\"tts_cpp_runtime_contract\":\"" << kTtsCppRuntimeContract << "\"";
+  out << ",\"tts_cpp_runtime_abi_version\":"
+      << kExpectedTtsCppRuntimeAbiVersion;
+  out << ",\"gguf_schema_version\":" << kExpectedTtsCppGgufSchemaVersion;
+  out << ",\"model_signature_contract\":\"" << kSignatureContract << "\"";
+  out << ",\"official_ep_context_payload_version\":\""
+      << kOfficialEpContextVersion << "\"";
+  out << ",\"graph_kind\":\"" << DetectCompiledModelGraphKind(ort_graph) << "\"";
+  out << ",\"backend\":\"" << JsonEscape(config.backend) << "\"";
+  out << ",\"device\":\"" << JsonEscape(config.device) << "\"";
+  out << ",\"precision\":\"" << JsonEscape(config.precision) << "\"";
+  out << "}";
+  return out.str();
+}
+
+bool ExtractExpectedJsonStringField(
+    const std::string& payload,
+    const std::string& key,
+    const char* expected_value) {
+  std::string value;
+  return ExtractJsonStringField(payload, key, value) && value == expected_value;
+}
+
+OrtCompiledModelCompatibility ValidateAivisCompiledModelCompatibilityInfo(
+    const char* compatibility_info) noexcept {
+  if (compatibility_info == nullptr || compatibility_info[0] == '\0') {
+    return OrtCompiledModelCompatibility_EP_NOT_APPLICABLE;
+  }
+
+  try {
+    const std::string payload{compatibility_info};
+    std::string value;
+    if (!ExtractJsonStringField(payload, "provider_name", value)) {
+      return OrtCompiledModelCompatibility_EP_NOT_APPLICABLE;
+    }
+    if (value != kEpName) {
+      return OrtCompiledModelCompatibility_EP_NOT_APPLICABLE;
+    }
+
+    if (!ExtractExpectedJsonStringField(
+            payload,
+            "version",
+            kCompiledModelCompatibilityVersion) ||
+        !ExtractExpectedJsonStringField(payload, "provider_version", kVersion) ||
+        !ExtractExpectedJsonStringField(
+            payload,
+            "runtime_registry_contract",
+            kRuntimeRegistryContract) ||
+        !ExtractExpectedJsonStringField(
+            payload,
+            "tts_cpp_runtime_contract",
+            kTtsCppRuntimeContract) ||
+        !ExtractExpectedJsonStringField(
+            payload,
+            "model_signature_contract",
+            kSignatureContract) ||
+        !ExtractExpectedJsonStringField(
+            payload,
+            "official_ep_context_payload_version",
+            kOfficialEpContextVersion)) {
+      return OrtCompiledModelCompatibility_EP_UNSUPPORTED;
+    }
+
+    int ort_api_version = 0;
+    if (!ExtractJsonIntField(payload, "ort_api_version", ort_api_version)) {
+      return OrtCompiledModelCompatibility_EP_UNSUPPORTED;
+    }
+    bool prefer_recompilation = ort_api_version != ORT_API_VERSION;
+
+    int runtime_abi_version = 0;
+    if (!ExtractJsonIntField(
+            payload,
+            "tts_cpp_runtime_abi_version",
+            runtime_abi_version) ||
+        runtime_abi_version !=
+            static_cast<int>(kExpectedTtsCppRuntimeAbiVersion)) {
+      return OrtCompiledModelCompatibility_EP_UNSUPPORTED;
+    }
+
+    int gguf_schema_version = 0;
+    if (!ExtractJsonIntField(
+            payload,
+            "gguf_schema_version",
+            gguf_schema_version) ||
+        gguf_schema_version != static_cast<int>(kExpectedTtsCppGgufSchemaVersion)) {
+      return OrtCompiledModelCompatibility_EP_UNSUPPORTED;
+    }
+
+    if (!ExtractJsonStringField(payload, "graph_kind", value) ||
+        (value != GraphKindName(AivisGgmlGraphKind::Synthesis) &&
+         value != GraphKindName(AivisGgmlGraphKind::JpBert))) {
+      return OrtCompiledModelCompatibility_EP_UNSUPPORTED;
+    }
+
+    if (ExtractJsonStringField(payload, "backend", value) &&
+        !IsSupportedBackend(value)) {
+      return OrtCompiledModelCompatibility_EP_UNSUPPORTED;
+    }
+    if (ExtractJsonStringField(payload, "precision", value) &&
+        !IsSupportedPrecision(value)) {
+      return OrtCompiledModelCompatibility_EP_UNSUPPORTED;
+    }
+
+    return prefer_recompilation
+        ? OrtCompiledModelCompatibility_EP_SUPPORTED_PREFER_RECOMPILATION
+        : OrtCompiledModelCompatibility_EP_SUPPORTED_OPTIMAL;
+  } catch (...) {
+    return OrtCompiledModelCompatibility_EP_UNSUPPORTED;
+  }
+}
+
 struct AivisGgmlEp final : OrtEp {
   AivisGgmlEp(
       const OrtApi& ort_api,
@@ -2431,6 +2591,7 @@ struct AivisGgmlEp final : OrtEp {
     GetCapability = GetCapabilityImpl;
     Compile = CompileImpl;
     ReleaseNodeComputeInfos = ReleaseNodeComputeInfosImpl;
+    GetCompiledModelCompatibilityInfo = GetCompiledModelCompatibilityInfoImpl;
   }
 
   static const char* ORT_API_CALL GetNameImpl(const OrtEp* /*this_ptr*/) noexcept {
@@ -2888,11 +3049,29 @@ struct AivisGgmlEp final : OrtEp {
     }
   }
 
+  static const char* ORT_API_CALL GetCompiledModelCompatibilityInfoImpl(
+      OrtEp* this_ptr,
+      const OrtGraph* graph) noexcept {
+    if (this_ptr == nullptr) {
+      return nullptr;
+    }
+    auto* ep = static_cast<AivisGgmlEp*>(this_ptr);
+    try {
+      ep->compatibility_info_ =
+          BuildCompiledModelCompatibilityInfo(ep->config_, graph);
+    } catch (...) {
+      ep->compatibility_info_ =
+          BuildCompiledModelCompatibilityInfo(ep->config_, nullptr);
+    }
+    return ep->compatibility_info_.c_str();
+  }
+
   const OrtApi& ort_api_;
   const OrtEpApi& ep_api_;
   const OrtLogger* logger_;
   AivisGgmlEpConfig config_;
   std::shared_ptr<TtsCppRuntime> runtime_;
+  std::string compatibility_info_;
 };
 
 struct AivisGgmlEpFactory final : OrtEpFactory {
@@ -3085,7 +3264,7 @@ struct AivisGgmlEpFactory final : OrtEpFactory {
       OrtEpFactory* this_ptr,
       const OrtHardwareDevice* const* /*devices*/,
       size_t /*num_devices*/,
-      const char* /*compatibility_info*/,
+      const char* compatibility_info,
       OrtCompiledModelCompatibility* model_compatibility) noexcept {
     auto* factory = static_cast<AivisGgmlEpFactory*>(this_ptr);
     if (model_compatibility == nullptr) {
@@ -3095,7 +3274,8 @@ struct AivisGgmlEpFactory final : OrtEpFactory {
           "Compiled model compatibility output is null.");
     }
 
-    *model_compatibility = OrtCompiledModelCompatibility_EP_NOT_APPLICABLE;
+    *model_compatibility =
+        ValidateAivisCompiledModelCompatibilityInfo(compatibility_info);
     return nullptr;
   }
 

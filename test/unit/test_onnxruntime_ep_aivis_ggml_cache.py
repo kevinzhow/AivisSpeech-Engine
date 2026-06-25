@@ -135,6 +135,12 @@ def test_prepare_ggml_cache_writes_portable_manifest(
         "requires_model_editor_api": True,
         "tested_runtime_version": "1.26.0",
     }
+    assert plan.manifest["compatibility_matrix"]["compiled_model_compatibility"] == {
+        "native_factory_validation": "supported",
+        "optimal_requires_exact_contract": True,
+        "ort_api_mismatch": "prefer_recompilation",
+        "version": "aivis-ggml-compiled-model-compatibility-v1",
+    }
     assert plan.manifest["compatibility_matrix"]["ep_context"][
         "official_node_inference"
     ] == "lazy_artifact_restore_tts_library_required"
@@ -336,6 +342,56 @@ def test_validate_official_ep_context_payload_rejects_graph_kind_mismatch(
         payload,
         graph_kind="jp-bert",
     ) == ("ep_context_payload_graph_kind_mismatch",)
+
+
+def test_compiled_model_compatibility_info_matches_native_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compiled model compatibility info mirrors native factory validation."""
+
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cache
+
+    payload = cache.build_compiled_model_compatibility_info(
+        graph_kind="synthesis",
+        backend="vulkan",
+        device="0",
+        precision="accurate",
+    )
+
+    assert payload["version"] == "aivis-ggml-compiled-model-compatibility-v1"
+    assert payload["provider_name"] == "AivisGgmlExecutionProvider"
+    assert payload["model_signature_contract"] == (
+        "aivis-ggml-signature-contract-v1"
+    )
+    assert "gguf_path" not in json.dumps(payload, sort_keys=True)
+    assert cache.validate_compiled_model_compatibility_info(payload) == "optimal"
+    assert (
+        cache.validate_compiled_model_compatibility_info(
+            json.dumps(payload, sort_keys=True),
+        )
+        == "optimal"
+    )
+
+    ort_api_mismatch = {**payload, "ort_api_version": 27}
+    assert cache.validate_compiled_model_compatibility_info(ort_api_mismatch) == (
+        "prefer_recompilation"
+    )
+
+    provider_mismatch = {**payload, "provider_name": "CPUExecutionProvider"}
+    assert cache.validate_compiled_model_compatibility_info(provider_mismatch) == (
+        "not_applicable"
+    )
+
+    provider_contract_mismatch = {**payload, "provider_version": "0.2.0"}
+    assert cache.validate_compiled_model_compatibility_info(
+        provider_contract_mismatch,
+    ) == "unsupported"
+
+    graph_kind_mismatch = {**payload, "graph_kind": "unsupported"}
+    assert cache.validate_compiled_model_compatibility_info(
+        graph_kind_mismatch,
+    ) == "unsupported"
 
 
 def test_initializer_tensor_pack_preserves_initializer_order_and_bytes(

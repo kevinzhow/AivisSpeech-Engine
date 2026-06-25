@@ -36,9 +36,16 @@ OFFICIAL_EP_CONTEXT_VERSION = "aivis-ggml-official-ep-context-v1"
 RUNTIME_REGISTRY_CONTRACT = "aivis-ggml-runtime-registry-v1"
 TTS_CPP_RUNTIME_CONTRACT = "tts-style-bert-vits2-c-api-v1"
 COMPATIBILITY_MATRIX_VERSION = "aivis-ggml-compatibility-matrix-v1"
+COMPILED_MODEL_COMPATIBILITY_VERSION = (
+    "aivis-ggml-compiled-model-compatibility-v1"
+)
+SIGNATURE_CONTRACT_VERSION = "aivis-ggml-signature-contract-v1"
 PROVIDER_NAME = "AivisGgmlExecutionProvider"
 PROVIDER_VERSION = "0.1.0"
 DEFAULT_CONVERTER_VERSION = PROVIDER_VERSION
+ORT_PLUGIN_EP_API_VERSION = 26
+EXPECTED_TTS_CPP_RUNTIME_ABI_VERSION = 1
+EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION = 1
 SUPPORTED_OFFICIAL_EP_CONTEXT_GRAPH_KINDS = ("synthesis", "jp-bert")
 SUPPORTED_BACKENDS = ("vulkan", "metal", "cpu")
 SUPPORTED_PRECISIONS = ("accurate", "fast")
@@ -340,8 +347,8 @@ def build_runtime_contract() -> dict[str, Any]:
         "required_tts_cpp_symbols": REQUIRED_TTS_CPP_SYMBOLS,
         "optional_tts_cpp_version_symbols": OPTIONAL_TTS_CPP_VERSION_SYMBOLS,
         "expected_optional_versions": {
-            "runtime_abi": 1,
-            "gguf_schema": 1,
+            "runtime_abi": EXPECTED_TTS_CPP_RUNTIME_ABI_VERSION,
+            "gguf_schema": EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION,
         },
     }
 
@@ -357,20 +364,20 @@ def build_compatibility_matrix() -> dict[str, Any]:
         },
         "onnxruntime": {
             "tested_runtime_version": "1.26.0",
-            "plugin_ep_api_version": 26,
+            "plugin_ep_api_version": ORT_PLUGIN_EP_API_VERSION,
             "requires_model_editor_api": True,
         },
         "runtime_contract": {
             "registry": RUNTIME_REGISTRY_CONTRACT,
             "tts_cpp_c_api": TTS_CPP_RUNTIME_CONTRACT,
             "expected_optional_versions": {
-                "runtime_abi": 1,
-                "gguf_schema": 1,
+                "runtime_abi": EXPECTED_TTS_CPP_RUNTIME_ABI_VERSION,
+                "gguf_schema": EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION,
             },
         },
         "model_signature_contracts": {
-            "synthesis": "aivis-ggml-signature-contract-v1",
-            "jp_bert": "aivis-ggml-signature-contract-v1",
+            "synthesis": SIGNATURE_CONTRACT_VERSION,
+            "jp_bert": SIGNATURE_CONTRACT_VERSION,
         },
         "ep_context": {
             "lite_manifest": EP_CONTEXT_LITE_VERSION,
@@ -379,7 +386,97 @@ def build_compatibility_matrix() -> dict[str, Any]:
             "official_payload_version": OFFICIAL_EP_CONTEXT_VERSION,
             "official_payload_validator": "supported",
         },
+        "compiled_model_compatibility": {
+            "version": COMPILED_MODEL_COMPATIBILITY_VERSION,
+            "native_factory_validation": "supported",
+            "optimal_requires_exact_contract": True,
+            "ort_api_mismatch": "prefer_recompilation",
+        },
     }
+
+
+def build_compiled_model_compatibility_info(
+    *,
+    graph_kind: str,
+    backend: str,
+    precision: str,
+    device: str = "",
+    ort_api_version: int = ORT_PLUGIN_EP_API_VERSION,
+) -> dict[str, Any]:
+    """Build the JSON contract used by ORT model package variant selection."""
+
+    payload = {
+        "version": COMPILED_MODEL_COMPATIBILITY_VERSION,
+        "provider_name": PROVIDER_NAME,
+        "provider_version": PROVIDER_VERSION,
+        "ort_api_version": ort_api_version,
+        "runtime_registry_contract": RUNTIME_REGISTRY_CONTRACT,
+        "tts_cpp_runtime_contract": TTS_CPP_RUNTIME_CONTRACT,
+        "tts_cpp_runtime_abi_version": EXPECTED_TTS_CPP_RUNTIME_ABI_VERSION,
+        "gguf_schema_version": EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION,
+        "model_signature_contract": SIGNATURE_CONTRACT_VERSION,
+        "official_ep_context_payload_version": OFFICIAL_EP_CONTEXT_VERSION,
+        "graph_kind": graph_kind,
+        "backend": backend,
+        "device": device,
+        "precision": precision,
+    }
+    compatibility = validate_compiled_model_compatibility_info(payload)
+    if compatibility == "unsupported":
+        raise ValueError("Invalid compiled model compatibility info.")
+    return payload
+
+
+def validate_compiled_model_compatibility_info(
+    payload: dict[str, Any] | str,
+) -> str:
+    """
+    Mirror native EP compiled model compatibility validation.
+
+    Returns one of ``optimal``, ``prefer_recompilation``, ``unsupported``, or
+    ``not_applicable``.
+    """
+
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return "not_applicable"
+        payload = parsed
+    if not isinstance(payload, dict):
+        return "not_applicable"
+
+    if payload.get("provider_name") != PROVIDER_NAME:
+        return "not_applicable"
+
+    expected_strings = {
+        "version": COMPILED_MODEL_COMPATIBILITY_VERSION,
+        "provider_version": PROVIDER_VERSION,
+        "runtime_registry_contract": RUNTIME_REGISTRY_CONTRACT,
+        "tts_cpp_runtime_contract": TTS_CPP_RUNTIME_CONTRACT,
+        "model_signature_contract": SIGNATURE_CONTRACT_VERSION,
+        "official_ep_context_payload_version": OFFICIAL_EP_CONTEXT_VERSION,
+    }
+    for key, expected in expected_strings.items():
+        if payload.get(key) != expected:
+            return "unsupported"
+
+    if payload.get("tts_cpp_runtime_abi_version") != (
+        EXPECTED_TTS_CPP_RUNTIME_ABI_VERSION
+    ):
+        return "unsupported"
+    if payload.get("gguf_schema_version") != EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION:
+        return "unsupported"
+    if payload.get("graph_kind") not in SUPPORTED_OFFICIAL_EP_CONTEXT_GRAPH_KINDS:
+        return "unsupported"
+    if payload.get("backend") not in SUPPORTED_BACKENDS:
+        return "unsupported"
+    if payload.get("precision") not in SUPPORTED_PRECISIONS:
+        return "unsupported"
+
+    if payload.get("ort_api_version") != ORT_PLUGIN_EP_API_VERSION:
+        return "prefer_recompilation"
+    return "optimal"
 
 
 def build_ep_context_lite(

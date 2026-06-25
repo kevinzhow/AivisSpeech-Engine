@@ -283,7 +283,13 @@ logic back into AivisSpeech Engine.
    - Every cache manifest records an explicit compatibility matrix: provider
      version, tested ONNX Runtime Plugin EP API version, TTS.cpp C API
      contract, GGUF schema expectation, synthesis/JP-BERT signature contracts,
-     EPContext support level, and EPContext payload version.
+     EPContext support level, EPContext payload version, and compiled-model
+     compatibility contract.
+   - The native Plugin EP now implements ORT compiled-model compatibility:
+     `GetCompiledModelCompatibilityInfo()` emits the provider/runtime/signature
+     contract as portable JSON for `ep_compatibility_info`, and
+     `ValidateCompiledModelCompatibilityInfo()` scores that metadata as
+     optimal, prefer-recompile, unsupported, or not-applicable.
    - Remaining production work: promote `prepare_cache --write-gguf` from a
      local helper to a versioned offline compiler command in hosted CI, add a
      package-owned JP-BERT GGUF writer, and expand the real-artifact matrix
