@@ -42,8 +42,10 @@ from voicevox_engine.tts_pipeline.style_bert_vits2_backend import (
     StyleBertVITS2SynthesisRequest,
 )
 from voicevox_engine.tts_pipeline.style_bert_vits2_tts_engine import (
+    OnnxPluginExecutionProviderConfig,
     StyleBertVITS2TTSEngine,
     _build_synthesis_performance_telemetry,
+    _configure_onnx_plugin_execution_provider,
     _resolve_served_backend_label,
 )
 from voicevox_engine.tts_pipeline.tts_cpp_sidecar import ManagedTtsCppSidecar
@@ -477,6 +479,129 @@ def _synthesize_and_get_infer_kwargs(
 
     assert recording_tts_model.infer_kwargs is not None
     return recording_tts_model.infer_kwargs
+
+
+def test_configure_onnx_plugin_execution_provider_registers_and_prepends(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Configured Plugin EP is registered and tried before ordinary providers."""
+
+    available_providers = ["CPUExecutionProvider"]
+    register_calls: list[tuple[str, str]] = []
+
+    def fake_register_execution_provider_library(
+        registration_name: str,
+        library_path: str,
+    ) -> None:
+        register_calls.append((registration_name, library_path))
+        available_providers.insert(0, "AivisGgmlExecutionProvider")
+
+    monkeypatch.setattr(
+        style_bert_vits2_tts_engine.onnxruntime,
+        "register_execution_provider_library",
+        fake_register_execution_provider_library,
+    )
+    monkeypatch.setattr(
+        style_bert_vits2_tts_engine.onnxruntime,
+        "get_available_providers",
+        lambda: list(available_providers),
+    )
+
+    providers = _configure_onnx_plugin_execution_provider(
+        base_providers=[
+            ("CUDAExecutionProvider", {"device_id": 0}),
+            ("CPUExecutionProvider", {"arena_extend_strategy": "kSameAsRequested"}),
+        ],
+        config=OnnxPluginExecutionProviderConfig(
+            provider_name="AivisGgmlExecutionProvider",
+            provider_options={"backend": "vulkan", "device": "0"},
+            library_path=tmp_path / "libaivis_ggml_ep.so",
+            registration_name="aivis-ggml",
+            strict=True,
+        ),
+    )
+
+    assert register_calls == [
+        ("aivis-ggml", str(tmp_path / "libaivis_ggml_ep.so"))
+    ]
+    assert providers[0] == (
+        "AivisGgmlExecutionProvider",
+        {"backend": "vulkan", "device": "0"},
+    )
+    assert providers[1:] == [
+        ("CUDAExecutionProvider", {"device_id": 0}),
+        ("CPUExecutionProvider", {"arena_extend_strategy": "kSameAsRequested"}),
+    ]
+
+
+def test_configure_onnx_plugin_execution_provider_keeps_fallback_when_non_strict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-strict Plugin EP setup failure preserves the normal ONNX provider list."""
+
+    def fake_register_execution_provider_library(
+        _registration_name: str,
+        _library_path: str,
+    ) -> None:
+        raise RuntimeError("plugin load failed")
+
+    monkeypatch.setattr(
+        style_bert_vits2_tts_engine.onnxruntime,
+        "register_execution_provider_library",
+        fake_register_execution_provider_library,
+    )
+    monkeypatch.setattr(
+        style_bert_vits2_tts_engine.onnxruntime,
+        "get_available_providers",
+        lambda: ["CPUExecutionProvider"],
+    )
+
+    base_providers = [("CPUExecutionProvider", {"arena_extend_strategy": "kSameAsRequested"})]
+    providers = _configure_onnx_plugin_execution_provider(
+        base_providers=base_providers,
+        config=OnnxPluginExecutionProviderConfig(
+            provider_name="AivisGgmlExecutionProvider",
+            provider_options={},
+            library_path=tmp_path / "missing.so",
+            strict=False,
+        ),
+    )
+
+    assert providers == base_providers
+
+
+def test_configure_onnx_plugin_execution_provider_raises_when_strict(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Strict Plugin EP setup fails startup instead of silently falling back."""
+
+    monkeypatch.setattr(
+        style_bert_vits2_tts_engine.onnxruntime,
+        "register_execution_provider_library",
+        lambda _registration_name, _library_path: None,
+    )
+    monkeypatch.setattr(
+        style_bert_vits2_tts_engine.onnxruntime,
+        "get_available_providers",
+        lambda: ["CPUExecutionProvider"],
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _configure_onnx_plugin_execution_provider(
+            base_providers=["CPUExecutionProvider"],
+            config=OnnxPluginExecutionProviderConfig(
+                provider_name="AivisGgmlExecutionProvider",
+                provider_options={},
+                library_path=tmp_path / "libaivis_ggml_ep.so",
+                strict=True,
+            ),
+        )
+
+    assert "AivisGgmlExecutionProvider" in str(exc_info.value)
+    assert "Available providers" in str(exc_info.value)
 
 
 def test_normalize_style_bert_vits2_pcm16_matches_peak_normalization() -> None:
@@ -1677,6 +1802,47 @@ def test_onnx_backend_prefers_same_uuid_aivmx_when_registered_path_is_aivm(
     )
 
     assert resolved_path == aivmx_path
+
+
+def test_onnx_backend_strict_provider_rejects_ort_python_fallback() -> None:
+    """Strict Plugin EP mode detects ORT Python fallback after session creation."""
+
+    backend = OnnxStyleBertVITS2Backend(
+        aivm_manager=cast(AivmManager, object()),
+        onnx_providers=[],
+        strict_provider_name="AivisGgmlExecutionProvider",
+    )
+    tts_model = SimpleNamespace(
+        onnx_session=SimpleNamespace(
+            get_providers=lambda: ["CPUExecutionProvider"],
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        backend._validate_strict_provider(cast(Any, tts_model))  # noqa: SLF001
+
+    assert "Strict ONNX Plugin EP mode expected provider" in str(exc_info.value)
+    assert "CPUExecutionProvider" in str(exc_info.value)
+
+
+def test_onnx_backend_strict_provider_accepts_selected_plugin_ep() -> None:
+    """Strict Plugin EP mode accepts sessions whose first provider is the plugin."""
+
+    backend = OnnxStyleBertVITS2Backend(
+        aivm_manager=cast(AivmManager, object()),
+        onnx_providers=[],
+        strict_provider_name="AivisGgmlExecutionProvider",
+    )
+    tts_model = SimpleNamespace(
+        onnx_session=SimpleNamespace(
+            get_providers=lambda: [
+                "AivisGgmlExecutionProvider",
+                "CPUExecutionProvider",
+            ],
+        ),
+    )
+
+    backend._validate_strict_provider(cast(Any, tts_model))  # noqa: SLF001
 
 
 def test_ggml_vulkan_backend_prefers_same_uuid_aivm_when_registered_path_is_aivmx(

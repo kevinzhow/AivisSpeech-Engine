@@ -71,6 +71,19 @@ from voicevox_engine.utility.user_agent_utility import collect_runtime_environme
 # ref: https://github.com/VOICEVOX/voicevox_engine/pull/647#issuecomment-1540204653
 _DEFAULT_HOST = "localhost"
 _DEFAULT_PORT = 10101
+_DEFAULT_ONNX_PLUGIN_EP_NAME = "AivisGgmlExecutionProvider"
+
+
+def parse_key_value_options(raw_options: list[str] | None) -> dict[str, str]:
+    """Parse repeated KEY=VALUE CLI options into a dictionary."""
+
+    parsed_options: dict[str, str] = {}
+    for raw_option in raw_options or []:
+        key, separator, value = raw_option.partition("=")
+        if separator == "" or key == "":
+            raise ValueError(f"Expected KEY=VALUE, got: {raw_option}")
+        parsed_options[key] = value
+    return parsed_options
 
 
 def decide_boolean_from_env(env_name: str) -> bool:
@@ -228,6 +241,11 @@ class _CLIArgs:
     ggml_tts_server_debug_timings: bool
     ggml_tts_server_log_path: Path | None
     ggml_native_library_path: Path | None
+    onnx_ep_library_path: Path | None
+    onnx_ep_registration_name: str
+    onnx_ep_name: str | None
+    onnx_ep_options: dict[str, str]
+    onnx_ep_strict: bool
     load_all_models: bool
     output_log_utf8: bool
     cors_policy_mode: CorsPolicyMode | None
@@ -430,6 +448,46 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
             "指定した場合、TTS.cpp sidecar HTTP の代わりに同一プロセス内の C API を呼び出します。"
         ),
     )
+    parser.add_argument(
+        "--onnx_ep_library_path",
+        type=Path,
+        default=None,
+        help=(
+            "ONNX Runtime Plugin EP の共有ライブラリパスです。"
+            "指定した場合、起動時に登録して ONNX Runtime provider の先頭に追加します。"
+        ),
+    )
+    parser.add_argument(
+        "--onnx_ep_registration_name",
+        default="aivis_onnx_plugin_ep",
+        help="ONNX Runtime Plugin EP library の登録名です。",
+    )
+    parser.add_argument(
+        "--onnx_ep_name",
+        default=None,
+        help=(
+            "優先する ONNX Runtime Plugin EP 名です。"
+            "省略時は --onnx_ep_library_path が指定された場合に "
+            f"{_DEFAULT_ONNX_PLUGIN_EP_NAME} を使います。"
+        ),
+    )
+    parser.add_argument(
+        "--onnx_ep_option",
+        action="append",
+        default=[],
+        help=(
+            "ONNX Runtime Plugin EP に渡す provider option です。"
+            "KEY=VALUE 形式で複数回指定できます。"
+        ),
+    )
+    parser.add_argument(
+        "--onnx_ep_strict",
+        action="store_true",
+        help=(
+            "ONNX Runtime Plugin EP の登録または選択に失敗した場合、"
+            "CPU/CUDA/DML へ黙ってフォールバックせず起動エラーにします。"
+        ),
+    )
     # parser.add_argument(
     #     "--voicevox_dir",
     #     type=Path,
@@ -555,6 +613,12 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
     # args_dict["voicelib_dirs"] = args_dict.pop("voicelib_dir")
     # args_dict["runtime_dirs"] = args_dict.pop("runtime_dir")
     args_dict["allow_origins"] = args_dict.pop("allow_origin")
+    try:
+        args_dict["onnx_ep_options"] = parse_key_value_options(
+            args_dict.pop("onnx_ep_option")
+        )
+    except ValueError as ex:
+        parser.error(str(ex))
 
     # --host に 127.0.0.1 が指定されたとき、Windows 上で localhost でアクセスした際に
     # IPv6 でバインドされないことによる接続遅延を防ぐために、代わりに localhost を指定し IPv4 と IPv6 の両方でバインドする
@@ -630,8 +694,19 @@ def main() -> None:
         # ごく稀に style_bert_vits2_tts_engine.py (が依存する onnxruntime) のインポート自体に失敗し
         # 例外が発生する環境があるようなので、例外をキャッチしてエラーログに出力できるよう、敢えてルーター初期化時にインポートする
         from voicevox_engine.tts_pipeline.style_bert_vits2_tts_engine import (
+            OnnxPluginExecutionProviderConfig,
             StyleBertVITS2TTSEngine,
         )
+
+        onnx_plugin_ep = None
+        if args.onnx_ep_library_path is not None or args.onnx_ep_name is not None:
+            onnx_plugin_ep = OnnxPluginExecutionProviderConfig(
+                library_path=args.onnx_ep_library_path,
+                registration_name=args.onnx_ep_registration_name,
+                provider_name=args.onnx_ep_name or _DEFAULT_ONNX_PLUGIN_EP_NAME,
+                provider_options=args.onnx_ep_options,
+                strict=args.onnx_ep_strict,
+            )
 
         # AivisSpeech Engine 独自の StyleBertVITS2TTSEngine を通常の TTSEngine の代わりに利用
         tts_engines = TTSEngineManager()
@@ -659,6 +734,7 @@ def main() -> None:
                 ggml_tts_server_debug_timings=args.ggml_tts_server_debug_timings,
                 ggml_tts_server_log_path=args.ggml_tts_server_log_path,
                 ggml_native_library_path=args.ggml_native_library_path,
+                onnx_plugin_ep=onnx_plugin_ep,
             ),
             MOCK_CORE_VERSION,
         )

@@ -11,13 +11,16 @@ from tools.benchmark_style_bert_vits2_ggml_vulkan import (
     _audio_artifact_path,
     _BenchmarkRecord,
     _build_benchmark_profile,
+    _build_onnx_plugin_ep_config,
     _evaluate_performance_gates,
     _extract_metal_device_log_evidence,
     _extract_tts_cpp_style_bert_timings,
     _extract_vulkan_device_log_evidence,
     _GgmlBackendSpec,
+    _OnnxPluginEpSpec,
     _parse_ggml_backend_specs,
     _parse_onnx_baseline_specs,
+    _parse_onnx_plugin_ep_specs,
     _provider_names,
     _QuerySpec,
     _read_sidecar_diagnostics,
@@ -539,6 +542,120 @@ def test_parse_onnx_baseline_specs_can_include_cuda() -> None:
         None,
         "CUDAExecutionProvider",
     ]
+
+
+def test_parse_onnx_plugin_ep_specs_defaults_to_vulkan_with_jp_bert(
+    tmp_path: Path,
+) -> None:
+    """Plugin EP benchmark runs claim synthesis and JP-BERT through TTS.cpp."""
+
+    library_path = tmp_path / "libaivis_ggml_onnx_ep.so"
+    tts_cpp_library_path = tmp_path / "libtts.so"
+    jp_bert_gguf_path = tmp_path / "jp-bert.gguf"
+    specs = _parse_onnx_plugin_ep_specs(
+        Namespace(
+            onnx_ep_library_path=library_path,
+            onnx_ep_tts_cpp_library_path=tts_cpp_library_path,
+            onnx_ep_backend=None,
+            onnx_ep_vulkan_precision=None,
+            jp_bert_gguf_path=jp_bert_gguf_path,
+            ggml_native_library_path=None,
+        )
+    )
+
+    assert specs == [
+        _OnnxPluginEpSpec(
+            name="ggml-vulkan-onnx-ep-jp-bert-native",
+            tts_cpp_backend="vulkan",
+            vulkan_precision="accurate",
+            tts_cpp_library_path=tts_cpp_library_path,
+        )
+    ]
+
+
+def test_parse_onnx_plugin_ep_specs_can_reuse_ggml_native_library_path(
+    tmp_path: Path,
+) -> None:
+    """The EP benchmark can share the same local TTS.cpp native library path."""
+
+    tts_cpp_library_path = tmp_path / "libtts.so"
+    specs = _parse_onnx_plugin_ep_specs(
+        Namespace(
+            onnx_ep_library_path=tmp_path / "libaivis_ggml_onnx_ep.so",
+            onnx_ep_tts_cpp_library_path=None,
+            onnx_ep_backend=["vulkan"],
+            onnx_ep_vulkan_precision=["accurate", "fast"],
+            jp_bert_gguf_path=tmp_path / "jp-bert.gguf",
+            ggml_native_library_path=tts_cpp_library_path,
+        )
+    )
+
+    assert [spec.name for spec in specs] == [
+        "ggml-vulkan-accurate-onnx-ep-jp-bert-native",
+        "ggml-vulkan-fast-onnx-ep-jp-bert-native",
+    ]
+    assert [spec.tts_cpp_library_path for spec in specs] == [
+        tts_cpp_library_path,
+        tts_cpp_library_path,
+    ]
+
+
+def test_parse_onnx_plugin_ep_specs_requires_jp_bert_gguf(
+    tmp_path: Path,
+) -> None:
+    """Claiming the JP-BERT graph requires a JP-BERT GGUF path."""
+
+    with pytest.raises(ValueError, match="jp_bert_gguf_path"):
+        _parse_onnx_plugin_ep_specs(
+            Namespace(
+                onnx_ep_library_path=tmp_path / "libaivis_ggml_onnx_ep.so",
+                onnx_ep_tts_cpp_library_path=tmp_path / "libtts.so",
+                onnx_ep_backend=None,
+                onnx_ep_vulkan_precision=None,
+                jp_bert_gguf_path=None,
+                ggml_native_library_path=None,
+            )
+        )
+
+
+def test_build_onnx_plugin_ep_config_claims_both_supported_graphs(
+    tmp_path: Path,
+) -> None:
+    """Provider options keep synthesis and JP-BERT on the Plugin EP path."""
+
+    config = _build_onnx_plugin_ep_config(
+        args=Namespace(
+            onnx_ep_library_path=tmp_path / "libaivis_ggml_onnx_ep.so",
+            onnx_ep_provider_name="AivisGgmlExecutionProvider",
+            onnx_ep_registration_name="aivis_ggml_benchmark_ep",
+            onnx_ep_n_threads=2,
+            gguf_path=tmp_path / "mao.gguf",
+            jp_bert_gguf_path=tmp_path / "jp-bert.gguf",
+            tts_device="0",
+        ),
+        spec=_OnnxPluginEpSpec(
+            name="ggml-vulkan-onnx-ep-jp-bert-native",
+            tts_cpp_backend="vulkan",
+            vulkan_precision="accurate",
+            tts_cpp_library_path=tmp_path / "libtts.so",
+        ),
+    )
+
+    assert config.library_path == tmp_path / "libaivis_ggml_onnx_ep.so"
+    assert config.provider_name == "AivisGgmlExecutionProvider"
+    assert config.strict is True
+    assert config.provider_options == {
+        "backend": "vulkan",
+        "claim_jp_bert_graph": "1",
+        "claim_synthesis_graph": "1",
+        "device": "0",
+        "eager_load_model": "1",
+        "gguf_path": str(tmp_path / "mao.gguf"),
+        "jp_bert_gguf_path": str(tmp_path / "jp-bert.gguf"),
+        "n_threads": "2",
+        "precision": "accurate",
+        "tts_cpp_library_path": str(tmp_path / "libtts.so"),
+    }
 
 
 def test_validate_onnx_baseline_provider_rejects_missing_cuda() -> None:

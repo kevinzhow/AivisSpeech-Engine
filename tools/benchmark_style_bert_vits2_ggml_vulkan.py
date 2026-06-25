@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from style_bert_vits2.constants import Languages
+from style_bert_vits2.nlp import onnx_bert_models
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -29,6 +31,7 @@ from voicevox_engine.aivm_metadata import read_aivm_metadata_from_path
 from voicevox_engine.metas.metas import StyleId
 from voicevox_engine.model import AudioQuery
 from voicevox_engine.tts_pipeline.style_bert_vits2_tts_engine import (
+    OnnxPluginExecutionProviderConfig,
     StyleBertVITS2TTSEngine,
 )
 from voicevox_engine.tts_pipeline.tts_cpp_diagnostics import (
@@ -109,6 +112,14 @@ class _OnnxBaselineSpec:
     name: str
     use_gpu: bool
     required_provider: str | None = None
+
+
+@dataclass(frozen=True)
+class _OnnxPluginEpSpec:
+    name: str
+    tts_cpp_backend: str
+    vulkan_precision: str | None
+    tts_cpp_library_path: Path
 
 
 _BACKEND_TIMING_SUMMARY_FIELDS = (
@@ -1104,6 +1115,104 @@ def _parse_onnx_baseline_specs(args: argparse.Namespace) -> list[_OnnxBaselineSp
     return specs
 
 
+def _parse_onnx_plugin_ep_specs(args: argparse.Namespace) -> list[_OnnxPluginEpSpec]:
+    if args.onnx_ep_library_path is None:
+        if args.onnx_ep_backend is not None:
+            raise ValueError("--onnx_ep_library_path is required for ONNX Plugin EP runs.")
+        return []
+
+    if args.jp_bert_gguf_path is None:
+        raise ValueError(
+            "--jp_bert_gguf_path is required for ONNX Plugin EP benchmark runs "
+            "because both synthesis and JP-BERT graphs are claimed."
+        )
+
+    tts_cpp_library_path = args.onnx_ep_tts_cpp_library_path
+    if tts_cpp_library_path is None:
+        tts_cpp_library_path = args.ggml_native_library_path
+    if tts_cpp_library_path is None:
+        raise ValueError(
+            "--onnx_ep_tts_cpp_library_path or --ggml_native_library_path is "
+            "required for ONNX Plugin EP benchmark runs."
+        )
+
+    backend_names = args.onnx_ep_backend or ["vulkan"]
+    vulkan_precision_names = args.onnx_ep_vulkan_precision or ["accurate"]
+    include_precision_suffix = (
+        len(vulkan_precision_names) > 1 or vulkan_precision_names[0] != "accurate"
+    )
+
+    specs: list[_OnnxPluginEpSpec] = []
+    for backend_name in backend_names:
+        if backend_name == "vulkan":
+            for vulkan_precision_name in vulkan_precision_names:
+                precision_suffix = (
+                    f"-{vulkan_precision_name}" if include_precision_suffix else ""
+                )
+                specs.append(
+                    _OnnxPluginEpSpec(
+                        name=(
+                            "ggml-vulkan"
+                            f"{precision_suffix}-onnx-ep-jp-bert-native"
+                        ),
+                        tts_cpp_backend="vulkan",
+                        vulkan_precision=vulkan_precision_name,
+                        tts_cpp_library_path=tts_cpp_library_path,
+                    )
+                )
+        elif backend_name == "metal":
+            specs.append(
+                _OnnxPluginEpSpec(
+                    name="ggml-metal-onnx-ep-jp-bert-native",
+                    tts_cpp_backend="metal",
+                    vulkan_precision=None,
+                    tts_cpp_library_path=tts_cpp_library_path,
+                )
+            )
+        elif backend_name == "cpu":
+            specs.append(
+                _OnnxPluginEpSpec(
+                    name="ggml-cpu-onnx-ep-jp-bert-native",
+                    tts_cpp_backend="cpu",
+                    vulkan_precision=None,
+                    tts_cpp_library_path=tts_cpp_library_path,
+                )
+            )
+        else:
+            raise ValueError(f"Unsupported ONNX Plugin EP backend: {backend_name}")
+    return specs
+
+
+def _build_onnx_plugin_ep_config(
+    *,
+    args: argparse.Namespace,
+    spec: _OnnxPluginEpSpec,
+) -> OnnxPluginExecutionProviderConfig:
+    assert args.onnx_ep_library_path is not None
+    assert args.jp_bert_gguf_path is not None
+    provider_options = {
+        "backend": spec.tts_cpp_backend,
+        "claim_jp_bert_graph": "1",
+        "claim_synthesis_graph": "1",
+        "eager_load_model": "1",
+        "gguf_path": str(args.gguf_path),
+        "jp_bert_gguf_path": str(args.jp_bert_gguf_path),
+        "n_threads": str(args.onnx_ep_n_threads),
+        "precision": spec.vulkan_precision or "accurate",
+        "tts_cpp_library_path": str(spec.tts_cpp_library_path),
+    }
+    if spec.tts_cpp_backend != "cpu" and args.tts_device is not None:
+        provider_options["device"] = args.tts_device
+
+    return OnnxPluginExecutionProviderConfig(
+        library_path=args.onnx_ep_library_path,
+        provider_name=args.onnx_ep_provider_name,
+        provider_options=provider_options,
+        registration_name=args.onnx_ep_registration_name,
+        strict=True,
+    )
+
+
 def _provider_names(
     providers: list[str] | Sequence[str | tuple[str, dict[str, Any]]],
 ) -> list[str]:
@@ -1132,6 +1241,18 @@ def _validate_onnx_baseline_provider(
 
 def _loaded_onnx_model_providers(model: Any) -> list[str]:
     session = getattr(model, "onnx_session", None)
+    get_providers = getattr(session, "get_providers", None)
+    if callable(get_providers):
+        return list(get_providers())
+    return []
+
+
+def _unload_onnx_bert_models() -> None:
+    onnx_bert_models.unload_all_models()
+
+
+def _loaded_jp_bert_providers() -> list[str]:
+    session = onnx_bert_models.load_model(Languages.JP)
     get_providers = getattr(session, "get_providers", None)
     if callable(get_providers):
         return list(get_providers())
@@ -1173,6 +1294,56 @@ def _parse_args() -> argparse.Namespace:
             "ONNX Runtime baseline to benchmark. Repeat to compare CPU and CUDA. "
             "Default: cpu."
         ),
+    )
+    parser.add_argument(
+        "--onnx_ep_library_path",
+        type=Path,
+        help=(
+            "External Aivis ggml ONNX Runtime Plugin EP library to benchmark. "
+            "When set, the harness claims both synthesis and JP-BERT graphs."
+        ),
+    )
+    parser.add_argument(
+        "--onnx_ep_tts_cpp_library_path",
+        type=Path,
+        help=(
+            "TTS.cpp native library used by the ONNX Plugin EP. Defaults to "
+            "--ggml_native_library_path when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--onnx_ep_provider_name",
+        default="AivisGgmlExecutionProvider",
+        help="Provider name exported by the external ONNX Runtime Plugin EP.",
+    )
+    parser.add_argument(
+        "--onnx_ep_registration_name",
+        default="aivis_ggml_benchmark_ep",
+        help="Registration name passed to ONNX Runtime for the Plugin EP library.",
+    )
+    parser.add_argument(
+        "--onnx_ep_backend",
+        action="append",
+        choices=["vulkan", "metal", "cpu"],
+        help=(
+            "TTS.cpp backend used by the ONNX Plugin EP. Repeat to run a matrix. "
+            "Default when --onnx_ep_library_path is set: vulkan."
+        ),
+    )
+    parser.add_argument(
+        "--onnx_ep_vulkan_precision",
+        action="append",
+        choices=["accurate", "fast"],
+        help=(
+            "TTS.cpp Vulkan precision mode used by the ONNX Plugin EP. Repeat "
+            "to run an accurate/fast matrix. Default: accurate."
+        ),
+    )
+    parser.add_argument(
+        "--onnx_ep_n_threads",
+        type=int,
+        default=0,
+        help="TTS.cpp CPU thread count option passed through the ONNX Plugin EP.",
     )
     parser.add_argument(
         "--ggml_backend",
@@ -1311,9 +1482,11 @@ def main() -> None:
         args.audio_output_dir.mkdir(parents=True, exist_ok=True)
     query_engine: StyleBertVITS2TTSEngine | None = None
     onnx_engines: list[StyleBertVITS2TTSEngine] = []
+    onnx_plugin_ep_engines: list[StyleBertVITS2TTSEngine] = []
     ggml_engines: list[StyleBertVITS2TTSEngine] = []
     try:
         onnx_baseline_specs = _parse_onnx_baseline_specs(args)
+        onnx_plugin_ep_specs = _parse_onnx_plugin_ep_specs(args)
         ggml_backend_specs = _parse_ggml_backend_specs(args)
         models_dir, model_uuid = _prepare_models_dir(
             tmp_path=tmp_path,
@@ -1343,10 +1516,12 @@ def main() -> None:
         )
         query_engine.close()
         query_engine = None
+        _unload_onnx_bert_models()
 
         records: list[_BenchmarkRecord] = []
         onnx_provider_diagnostics: dict[str, Any] = {}
         for onnx_baseline_spec in onnx_baseline_specs:
+            _unload_onnx_bert_models()
             onnx_engine = StyleBertVITS2TTSEngine(
                 aivm_manager,
                 use_gpu=onnx_baseline_spec.use_gpu,
@@ -1356,16 +1531,22 @@ def main() -> None:
             )
             onnx_engines.append(onnx_engine)
             configured_providers = _provider_names(onnx_engine.onnx_providers)
+            bert_actual_providers = _loaded_jp_bert_providers()
             onnx_model = onnx_engine.load_model(model_uuid)
             actual_providers = _loaded_onnx_model_providers(onnx_model)
             _validate_onnx_baseline_provider(
                 spec=onnx_baseline_spec,
                 active_providers=actual_providers,
             )
+            _validate_onnx_baseline_provider(
+                spec=onnx_baseline_spec,
+                active_providers=bert_actual_providers,
+            )
             onnx_provider_diagnostics[onnx_baseline_spec.name] = {
                 "available_providers": onnx_engine.available_onnx_providers,
                 "configured_providers": configured_providers,
                 "active_providers": actual_providers,
+                "bert_active_providers": bert_actual_providers,
             }
             records.extend(
                 _run_backend(
@@ -1377,8 +1558,62 @@ def main() -> None:
                     audio_output_dir=args.audio_output_dir,
                 )
             )
+        onnx_plugin_ep_provider_diagnostics: dict[str, Any] = {}
+        for onnx_plugin_ep_spec in onnx_plugin_ep_specs:
+            _unload_onnx_bert_models()
+            onnx_plugin_ep_config = _build_onnx_plugin_ep_config(
+                args=args,
+                spec=onnx_plugin_ep_spec,
+            )
+            onnx_plugin_ep_engine = StyleBertVITS2TTSEngine(
+                aivm_manager,
+                use_gpu=False,
+                load_all_models=False,
+                bert_model_cache_dir=args.bert_cache_dir,
+                tts_backend="onnx",
+                onnx_plugin_ep=onnx_plugin_ep_config,
+            )
+            onnx_plugin_ep_engines.append(onnx_plugin_ep_engine)
+            configured_providers = _provider_names(
+                onnx_plugin_ep_engine.onnx_providers
+            )
+            bert_actual_providers = _loaded_jp_bert_providers()
+            onnx_plugin_ep_model = onnx_plugin_ep_engine.load_model(model_uuid)
+            actual_providers = _loaded_onnx_model_providers(onnx_plugin_ep_model)
+            if onnx_plugin_ep_config.provider_name not in actual_providers:
+                raise RuntimeError(
+                    f"{onnx_plugin_ep_spec.name} requires "
+                    f"{onnx_plugin_ep_config.provider_name}, but active ONNX "
+                    f"providers are: {actual_providers}"
+                )
+            if onnx_plugin_ep_config.provider_name not in bert_actual_providers:
+                raise RuntimeError(
+                    f"{onnx_plugin_ep_spec.name} requires JP-BERT to use "
+                    f"{onnx_plugin_ep_config.provider_name}, but active ONNX "
+                    f"BERT providers are: {bert_actual_providers}. This usually "
+                    "means a previous backend reused the global Style-Bert-VITS2 "
+                    "JP-BERT session cache."
+                )
+            onnx_plugin_ep_provider_diagnostics[onnx_plugin_ep_spec.name] = {
+                "available_providers": onnx_plugin_ep_engine.available_onnx_providers,
+                "configured_providers": configured_providers,
+                "active_providers": actual_providers,
+                "bert_active_providers": bert_actual_providers,
+                "provider_options": onnx_plugin_ep_config.provider_options,
+            }
+            records.extend(
+                _run_backend(
+                    backend_name=onnx_plugin_ep_spec.name,
+                    engine=onnx_plugin_ep_engine,
+                    query_specs=query_specs,
+                    warmup_runs=args.warmup_runs,
+                    measured_runs=args.runs,
+                    audio_output_dir=args.audio_output_dir,
+                )
+            )
         sidecar_diagnostics: dict[str, dict[str, Any]] = {}
         for ggml_backend_spec in ggml_backend_specs:
+            _unload_onnx_bert_models()
             backend_log_path = sidecar_log_path.with_name(
                 f"{sidecar_log_path.stem}-{ggml_backend_spec.name}{sidecar_log_path.suffix}"
             )
@@ -1516,6 +1751,16 @@ def main() -> None:
                     if args.ggml_native_library_path is not None
                     else None
                 ),
+                "onnx_ep_library_path": (
+                    str(args.onnx_ep_library_path)
+                    if args.onnx_ep_library_path is not None
+                    else None
+                ),
+                "onnx_ep_tts_cpp_library_path": (
+                    str(args.onnx_ep_tts_cpp_library_path)
+                    if args.onnx_ep_tts_cpp_library_path is not None
+                    else None
+                ),
                 "sidecar_logs": sidecar_logs,
                 "audio_output_dir": (
                     str(args.audio_output_dir)
@@ -1533,7 +1778,27 @@ def main() -> None:
                     onnx_baseline_spec.name
                     for onnx_baseline_spec in onnx_baseline_specs
                 ],
+                "onnx_plugin_ep_backends": [
+                    onnx_plugin_ep_spec.name
+                    for onnx_plugin_ep_spec in onnx_plugin_ep_specs
+                ],
                 "onnx_provider_diagnostics": onnx_provider_diagnostics,
+                "onnx_plugin_ep_provider_diagnostics": (
+                    onnx_plugin_ep_provider_diagnostics
+                ),
+                "onnx_plugin_ep_matrix": [
+                    {
+                        "name": onnx_plugin_ep_spec.name,
+                        "tts_cpp_backend": onnx_plugin_ep_spec.tts_cpp_backend,
+                        "transport": "native-binding",
+                        "vulkan_precision": (
+                            onnx_plugin_ep_spec.vulkan_precision
+                        ),
+                        "claim_synthesis_graph": True,
+                        "claim_jp_bert_graph": True,
+                    }
+                    for onnx_plugin_ep_spec in onnx_plugin_ep_specs
+                ],
                 "ggml_backend_matrix": [
                     {
                         "name": ggml_backend_spec.name,
@@ -1580,8 +1845,11 @@ def main() -> None:
             query_engine.close()
         for onnx_engine in onnx_engines:
             onnx_engine.close()
+        for onnx_plugin_ep_engine in onnx_plugin_ep_engines:
+            onnx_plugin_ep_engine.close()
         for ggml_engine in ggml_engines:
             ggml_engine.close()
+        _unload_onnx_bert_models()
         if work_dir_context is not None and args.keep_work_dir is False:
             work_dir_context.cleanup()
 

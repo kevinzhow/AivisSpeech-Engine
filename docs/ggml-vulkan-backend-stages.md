@@ -8,7 +8,9 @@
 - `.aivmx` 模型直接交给 `style_bert_vits2.TTSModel`。
 - 推理执行依赖 ONNX Runtime provider，当前实际选择面是 CPU、CUDA、DirectML。
 
-因此，ggml/Vulkan 不应作为 ONNX Runtime 的一个 provider 补丁接入，而应作为并行的 native 推理后端接入。第一版目标是保留现有 ONNX 路径为默认稳定路径，把 Vulkan 做成显式 opt-in，并且每个阶段都有可回滚边界。
+因此，ggml/Vulkan 的执行逻辑不应作为 AivisSpeech Engine 内部的 ONNX Runtime provider 补丁接入。当前已验证路线仍是并行的显式 opt-in native 推理后端：保留现有 ONNX 路径为默认稳定路径，把 Vulkan 做成显式 opt-in，并且每个阶段都有可回滚边界。
+
+如果后续要尝试 ONNX Runtime Plugin EP 路线，也必须保持完全外置：AivisSpeech Engine 只做通用 Plugin EP shared library 注册和 provider 顺序选择，不承载 ggml 图匹配、TTS.cpp runner、GGUF cache、Vulkan device routing、JP-BERT ONNX 替换或 synthesis 执行逻辑。该路线的边界与阶段记录在 [GGML ONNX Runtime Plugin Provider](./ggml-onnx-plugin-provider.md)。
 
 For ggml/TTS.cpp, AIVM/Safetensors is the preferred source format. Safetensors preserves the original named weight tensors more directly, which matches TTS.cpp's GGUF conversion model. AIVMX/ONNX remains the compatibility format for the existing ONNX backend and for parity baselines, but automatic GGUF conversion should not depend on ONNX graph/export names.
 
@@ -368,7 +370,7 @@ uv run python run.py \
   --ggml_vulkan_device 0 \
   --ggml_vulkan_precision accurate \
   --ggml_tts_server_debug_timings \
-  --ggml_tts_server_log_path /tmp/aivisspeech-tts-cpp-sidecar.log
+  --ggml_tts_server_log_path <path-to-sidecar-log>
 ```
 
 User-managed sidecar remains supported:
@@ -462,10 +464,10 @@ Local AMD 780M verification command:
 ```bash
 MESA_VK_DEVICE_SELECT=1002:1900! \
 AIVIS_GGML_VULKAN_TEST=1 \
-AIVIS_GGML_TEST_AIVMX_PATH=/home/kevinzhow/github/kokoro-tts/tmp/aivisspeech-engine-data/Models/a59cb814-0083-4369-8542-f51a29e72af7.aivmx \
-AIVIS_GGML_TEST_AIVM_PATH=/home/kevinzhow/github/kokoro-tts/tmp/style-bert-vits2-assets/_downloads/mao.aivm \
-AIVIS_GGML_TEST_GGUF_PATH=/home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-voices/mao-full-sdp.gguf \
-AIVIS_GGML_TEST_TTS_SERVER_PATH=/home/kevinzhow/github/TTS.cpp/build-vulkan-latest-main/bin/tts-server \
+AIVIS_GGML_TEST_AIVMX_PATH=<path-to-model.aivmx> \
+AIVIS_GGML_TEST_AIVM_PATH=<path-to-model.aivm> \
+AIVIS_GGML_TEST_GGUF_PATH=<path-to-mao-full-sdp.gguf> \
+AIVIS_GGML_TEST_TTS_SERVER_PATH=<path-to-tts-server> \
 AIVIS_GGML_TEST_STYLE_ID=888753760 \
 AIVIS_GGML_TEST_VULKAN_PRECISION=accurate \
 AIVIS_GGML_TEST_EXPECT_LOG_CONTAINS='AMD Radeon 780M Graphics' \
@@ -485,7 +487,7 @@ Verified result on 2026-06-24: `1 passed`, with strict Vulkan sidecar logging th
 - GGUF cache manifests now store both the opaque `cache_key` and explicit `cache_key_inputs`: resolved AIVM/Safetensors path, file size, file mtime, manifest UUID/version, model architecture, converter version, and GGUF schema version.
 - `AivmGgufCache` can run TTS.cpp `py-gguf` converters that keep their dependencies in an adjacent virtualenv. If `--ggml_converter_path` points into a directory with `.venv312` or `.venv`, the cache invokes that Python interpreter and bridges the Engine's current `style_bert_vits2` and `aivmlib` packages into the converter process. The bridge also provides a no-op `pyworld` import stub because conversion needs to import `style_bert_vits2.tts_model` but does not use voice pitch/intonation adjustment. If no adjacent converter virtualenv exists, it runs the converter directly and bridges the adjacent `gguf` package only, avoiding incompatible full-venv `PYTHONPATH` leakage.
 - Stage 2 model lifecycle coverage now includes deleting all same-UUID `.aivm`/`.aivmx` install files and default GGUF cache entries on uninstall.
-- Local source-format probe on 2026-06-24 confirmed `/home/kevinzhow/github/kokoro-tts/tmp/style-bert-vits2-assets/_downloads/mao.aivm` opens through Safetensors directly, with `1165` tensors and metadata keys including `aivm_hyper_parameters`, `aivm_manifest`, and `aivm_style_vectors`.
+- Local source-format probe on 2026-06-24 confirmed the `まお` AIVM opens through Safetensors directly, with `1165` tensors and metadata keys including `aivm_hyper_parameters`, `aivm_manifest`, and `aivm_style_vectors`.
 - Stage 2 now has an opt-in automatic conversion integration test that exercises `.aivm` -> `GgufModelCaches/*.gguf` -> managed TTS.cpp sidecar synthesis without passing a preconverted `--ggml_model_path`:
 
 ```bash
@@ -500,17 +502,17 @@ uv run --group dev pytest \
   test/integration/test_style_bert_vits2_ggml_vulkan.py::test_managed_ggml_vulkan_sidecar_converts_aivm_cache_and_synthesizes -q
 ```
 
-Local run status on 2026-06-24: `1 passed` on the AMD 780M host after installing `onnx` into `/home/kevinzhow/github/TTS.cpp/py-gguf/.venv312`. The generated cache file was `240M`, used a dot-free TTS.cpp model id stem (`1_2_0` instead of `1.2.0`), wrote manifest `cache_key_inputs`, and the sidecar log showed `AMD Radeon 780M Graphics (RADV PHOENIX)` plus `POST /v1/style-bert-vits2/synthesize-front 200`.
+Local run status on 2026-06-24: `1 passed` on the AMD 780M host after installing the converter's `onnx` dependency. The generated cache file was `240M`, used a dot-free TTS.cpp model id stem (`1_2_0` instead of `1.2.0`), wrote manifest `cache_key_inputs`, and the sidecar log showed `AMD Radeon 780M Graphics (RADV PHOENIX)` plus `POST /v1/style-bert-vits2/synthesize-front 200`.
 - Stage 5 now has basic engine-level per-request telemetry, including total RTF, plus an executable local benchmark harness. The integration test and benchmark harness both read managed sidecar logs and fail Vulkan/Metal runs when the log does not prove an accelerator device/backend was active. The benchmark stores Vulkan/Metal device evidence in `metadata.sidecar_diagnostics` and parses TTS.cpp `STYLE_BERT_VITS2_*_TIMING` graph timing lines when requested:
 
 ```bash
 MESA_VK_DEVICE_SELECT=1002:1900! \
 uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
-  --aivm_path /home/kevinzhow/github/kokoro-tts/tmp/style-bert-vits2-assets/_downloads/mao.aivm \
-  --aivmx_path /home/kevinzhow/github/kokoro-tts/tmp/aivisspeech-engine-data/Models/a59cb814-0083-4369-8542-f51a29e72af7.aivmx \
-  --gguf_path /home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-voices/mao-full-sdp.gguf \
-  --jp_bert_gguf_path /home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-jp-bert.gguf \
-  --tts_server_path /home/kevinzhow/github/TTS.cpp/build-vulkan-latest-main/bin/tts-server \
+  --aivm_path <path-to-model.aivm> \
+  --aivmx_path <path-to-model.aivmx> \
+  --gguf_path <path-to-mao-full-sdp.gguf> \
+  --jp_bert_gguf_path <path-to-style-bert-vits2-jp-bert.gguf> \
+  --tts_server_path <path-to-tts-server> \
   --ggml_backend vulkan \
   --ggml_frontend tts-cpp-jp-bert \
   --ggml_vulkan_precision accurate \
@@ -554,7 +556,7 @@ Performance interpretation guardrails:
 - Results labeled `frontend_mode onnx-bert` still use Python-side ONNX BERT feature extraction. They are useful as a comparison baseline, but they should not be used to judge the ggml JP-BERT path.
 - One-run `cold_smoke` results, especially the 6-character short sentence, are for route/device validation only. Treat warmed short/medium/long runs as the evidence for performance trend.
 
-A base64 payload-summary verification on 2026-06-24 wrote `/tmp/aivis-ggml-b64-payload-summary-v3.json` from a three-text `warm_single_run` probe with `MESA_VK_DEVICE_SELECT=1002:1900!`, `--ggml_backend vulkan`, `--ggml_frontend onnx-bert`, `--ggml_synthesis_endpoint synthesize-front`, and default `--ggml_bert_payload_format base64`. The report included `per_text_backend_timing_summary`, `bert_payload_format=base64`, `numeric_payload_bytes`, and captured `AMD Radeon 780M Graphics (RADV PHOENIX)` in `metadata.sidecar_diagnostics.ggml-vulkan.vulkan_device_evidence`. Because it used one measured run after warmup, treat the RTF values as a quick warmed probe rather than steady-state statistics:
+A base64 payload-summary verification on 2026-06-24 wrote a local JSON report from a three-text `warm_single_run` probe with `MESA_VK_DEVICE_SELECT=1002:1900!`, `--ggml_backend vulkan`, `--ggml_frontend onnx-bert`, `--ggml_synthesis_endpoint synthesize-front`, and default `--ggml_bert_payload_format base64`. The report included `per_text_backend_timing_summary`, `bert_payload_format=base64`, `numeric_payload_bytes`, and captured `AMD Radeon 780M Graphics (RADV PHOENIX)` in `metadata.sidecar_diagnostics.ggml-vulkan.vulkan_device_evidence`. Because it used one measured run after warmup, treat the RTF values as a quick warmed probe rather than steady-state statistics:
 
 | text length | ONNX CPU RTF | ggml Vulkan RTF | request JSON bytes | BERT binary bytes | BERT payload bytes | numeric payload bytes | JSON / BERT binary | sidecar HTTP |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -566,7 +568,7 @@ An attempted all-numeric base64 probe also sent `phone_ids_b64`, `tone_ids_b64`,
 
 A one-run device-evidence and graph-timing smoke on 2026-06-24 confirmed the benchmark's automatic Vulkan log gates with `--ggml_debug_timings`: `metadata.sidecar_diagnostics.ggml-vulkan.vulkan_device_evidence` captured `ggml_vulkan: Found 1 Vulkan devices:` and `AMD Radeon 780M Graphics (RADV PHOENIX)`, while `style_bert_vits2_timings.event_count` was `6`. That smoke still used `frontend_mode onnx-bert` and produced `ggml-vulkan` RTF `0.562` for `テストです。`; parsed TTS.cpp graph-event totals were `compute_submit_ms_sum=112.916`, `read_ms_sum=73.903`, and `total_ms_sum=195.908`. The remaining gap to the pure TTS.cpp ref is expected for the integrated sidecar path because Python frontend work and JSON/HTTP transfer are included.
 
-Latest TTS.cpp JP-BERT/base64 warmed probe on 2026-06-24 wrote `/tmp/aivis-ggml-tts-cpp-jp-bert-summary.json` with `MESA_VK_DEVICE_SELECT=1002:1900!`, `--ggml_backend vulkan`, `--ggml_frontend tts-cpp-jp-bert`, `--jp_bert_gguf_path /home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-jp-bert.gguf`, `--ggml_synthesis_endpoint synthesize-front`, `--ggml_bert_payload_format base64`, `--warmup_runs 1`, `--runs 1`, and `--expect_sidecar_log_contains 'AMD Radeon 780M Graphics'`. Treat it as a quick warmed probe rather than a multi-sample benchmark, but use it as the current routing sanity check because it exercises TTS.cpp JP-BERT instead of ONNX BERT:
+Latest TTS.cpp JP-BERT/base64 warmed probe on 2026-06-24 wrote a local JSON report with `MESA_VK_DEVICE_SELECT=1002:1900!`, `--ggml_backend vulkan`, `--ggml_frontend tts-cpp-jp-bert`, `--jp_bert_gguf_path <path-to-style-bert-vits2-jp-bert.gguf>`, `--ggml_synthesis_endpoint synthesize-front`, `--ggml_bert_payload_format base64`, `--warmup_runs 1`, `--runs 1`, and `--expect_sidecar_log_contains 'AMD Radeon 780M Graphics'`. Treat it as a quick warmed probe rather than a multi-sample benchmark, but use it as the current routing sanity check because it exercises TTS.cpp JP-BERT instead of ONNX BERT:
 
 | text length | ONNX CPU RTF | ggml Vulkan + TTS.cpp JP-BERT RTF | frontend | JP-BERT HTTP | sidecar synthesis HTTP | request JSON bytes |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -577,7 +579,7 @@ Latest TTS.cpp JP-BERT/base64 warmed probe on 2026-06-24 wrote `/tmp/aivis-ggml-
 
 This confirms that the current TTS.cpp JP-BERT path is the one that brings integrated AivisSpeech ggml/Vulkan back to the expected `~0.2` RTF range. The short sentence is still slightly above `0.2` in this run because fixed sidecar/frontend overhead dominates one-second audio, while medium and long text are below `0.2`.
 
-Native-binding JP-BERT warmed probe on 2026-06-24 wrote `/tmp/aivis-ggml-native-binding-jp-bert-summary.json` with `MESA_VK_DEVICE_SELECT=1002:1900!`, `--ggml_backend vulkan`, `--ggml_frontend tts-cpp-jp-bert`, `--jp_bert_gguf_path /home/kevinzhow/github/TTS.cpp/tmp/style-bert-vits2-jp-bert.gguf`, `--ggml_synthesis_endpoint synthesize-front`, `--ggml_native_library_path /home/kevinzhow/github/TTS.cpp/build-native-binding-shared/src/libtts.so`, `--warmup_runs 1`, and `--runs 1`. The TTS.cpp shared library printed Vulkan device discovery for `AMD Radeon 780M Graphics (RADV PHOENIX)` during the run. Treat it as a quick warmed probe, but it is the current best integrated route because it removes HTTP, base64 tensor transfer, and WAV decode from the sidecar path:
+Native-binding JP-BERT warmed probe on 2026-06-24 wrote a local JSON report with `MESA_VK_DEVICE_SELECT=1002:1900!`, `--ggml_backend vulkan`, `--ggml_frontend tts-cpp-jp-bert`, `--jp_bert_gguf_path <path-to-style-bert-vits2-jp-bert.gguf>`, `--ggml_synthesis_endpoint synthesize-front`, `--ggml_native_library_path <path-to-libtts.so>`, `--warmup_runs 1`, and `--runs 1`. The TTS.cpp shared library printed Vulkan device discovery for `AMD Radeon 780M Graphics (RADV PHOENIX)` during the run. Treat it as a quick warmed probe, but it is the current best integrated route because it removes HTTP, base64 tensor transfer, and WAV decode from the sidecar path:
 
 | text length | ONNX CPU RTF | ggml Vulkan + native JP-BERT RTF | frontend | native JP-BERT | native synthesis | request JSON bytes | BERT payload |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |

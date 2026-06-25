@@ -256,9 +256,11 @@ class OnnxStyleBertVITS2Backend:
         self,
         aivm_manager: AivmManager,
         onnx_providers: Sequence[str | tuple[str, dict[str, Any]]],
+        strict_provider_name: str | None = None,
     ) -> None:
         self._aivm_manager = aivm_manager
         self._onnx_providers = onnx_providers
+        self._strict_provider_name = strict_provider_name
         self._tts_models: dict[str, TTSModel] = {}
         self._tts_models_lock = threading.Lock()
 
@@ -308,6 +310,7 @@ class OnnxStyleBertVITS2Backend:
         start_time = time.time()
         logger.info(f"Loading {aivm_info.manifest.name} ({aivm_model_uuid}) ...")
         tts_model.load()
+        self._validate_strict_provider(tts_model)
         with self._tts_models_lock:
             if aivm_model_uuid in self._tts_models:
                 logger.info(
@@ -321,6 +324,26 @@ class OnnxStyleBertVITS2Backend:
         )
 
         return tts_model
+
+    def _validate_strict_provider(self, tts_model: TTSModel) -> None:
+        """Ensure ONNX Runtime did not silently fall back from a strict Plugin EP."""
+
+        if self._strict_provider_name is None:
+            return
+        if tts_model.onnx_session is None:
+            raise RuntimeError(
+                "Strict ONNX Plugin EP mode expected an ONNX Runtime session, "
+                "but the loaded model did not expose one."
+            )
+
+        actual_providers = tts_model.onnx_session.get_providers()
+        actual_provider = actual_providers[0] if actual_providers else None
+        if actual_provider != self._strict_provider_name:
+            raise RuntimeError(
+                "Strict ONNX Plugin EP mode expected provider "
+                f"{self._strict_provider_name!r}, but ONNX Runtime selected "
+                f"{actual_provider!r}. Full provider list: {actual_providers}"
+            )
 
     def _resolve_onnx_source_path(
         self,

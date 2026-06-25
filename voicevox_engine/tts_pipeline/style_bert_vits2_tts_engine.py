@@ -74,6 +74,84 @@ class SynthesisPerformanceTelemetry:
     rtf: float | None
 
 
+@dataclass(frozen=True)
+class OnnxPluginExecutionProviderConfig:
+    """External ONNX Runtime Plugin EP registration and selection settings."""
+
+    provider_name: str
+    provider_options: dict[str, str]
+    library_path: Path | None = None
+    registration_name: str = "aivis_onnx_plugin_ep"
+    strict: bool = False
+
+
+def _configure_onnx_plugin_execution_provider(
+    *,
+    base_providers: Sequence[str | tuple[str, dict[str, Any]]],
+    config: OnnxPluginExecutionProviderConfig | None,
+) -> list[str | tuple[str, dict[str, Any]]]:
+    """Register and prepend an external ONNX Runtime Plugin EP when configured."""
+
+    providers = list(base_providers)
+    if config is None:
+        return providers
+
+    registration_error: Exception | None = None
+    if config.library_path is not None:
+        try:
+            onnxruntime.register_execution_provider_library(
+                config.registration_name,
+                str(config.library_path),
+            )
+            logger.info(
+                "Registered ONNX Runtime Plugin EP library %s from %s.",
+                config.registration_name,
+                config.library_path,
+            )
+        except Exception as ex:
+            registration_error = ex
+
+    available_providers = onnxruntime.get_available_providers()
+    if config.provider_name not in available_providers:
+        detail = (
+            f"ONNX Runtime Plugin EP '{config.provider_name}' is not available. "
+            f"Available providers: {available_providers}"
+        )
+        if registration_error is not None:
+            detail += f" Registration failed: {registration_error}"
+        if config.strict:
+            raise RuntimeError(detail) from registration_error
+        logger.warning(detail)
+        return providers
+
+    if registration_error is not None:
+        logger.warning(
+            "ONNX Runtime Plugin EP library registration reported an error, "
+            "but provider %s is already available; continuing.",
+            config.provider_name,
+            exc_info=registration_error,
+        )
+
+    providers = [
+        provider
+        for provider in providers
+        if _onnx_provider_name(provider) != config.provider_name
+    ]
+    providers.insert(0, (config.provider_name, dict(config.provider_options)))
+    logger.info(
+        "Using external ONNX Runtime Plugin EP %s before fallback providers %s.",
+        config.provider_name,
+        [_onnx_provider_name(provider) for provider in providers[1:]],
+    )
+    return providers
+
+
+def _onnx_provider_name(provider: str | tuple[str, dict[str, Any]]) -> str:
+    """Return the ONNX Runtime provider name from string or option tuple forms."""
+
+    return provider if isinstance(provider, str) else provider[0]
+
+
 class StyleBertVITS2TTSEngine(TTSEngine):
     """
     AivisSpeech Engine におけるテキスト音声合成エンジンの実装。
@@ -114,6 +192,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         ggml_tts_server_debug_timings: bool = False,
         ggml_tts_server_log_path: Path | None = None,
         ggml_native_library_path: Path | None = None,
+        onnx_plugin_ep: OnnxPluginExecutionProviderConfig | None = None,
     ) -> None:
         self.aivm_manager = aivm_manager
         self.use_gpu = use_gpu
@@ -194,6 +273,17 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         else:
             logger.info("Using CPU for inference.")
 
+        self.onnx_providers = _configure_onnx_plugin_execution_provider(
+            base_providers=self.onnx_providers,
+            config=onnx_plugin_ep,
+        )
+        self.available_onnx_providers = onnxruntime.get_available_providers()
+        strict_onnx_provider_name = (
+            onnx_plugin_ep.provider_name
+            if onnx_plugin_ep is not None and onnx_plugin_ep.strict
+            else None
+        )
+
         if tts_backend == "ggml-vulkan":
             self._performance_backend_label = (
                 "ggml-cpu"
@@ -265,6 +355,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             onnx_fallback_backend = OnnxStyleBertVITS2Backend(
                 aivm_manager=self.aivm_manager,
                 onnx_providers=self.onnx_providers,
+                strict_provider_name=strict_onnx_provider_name,
             )
             self._backend = FallbackStyleBertVITS2Backend(
                 primary_backend=ggml_backend,
@@ -281,11 +372,13 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             self._backend = OnnxStyleBertVITS2Backend(
                 aivm_manager=self.aivm_manager,
                 onnx_providers=self.onnx_providers,
+                strict_provider_name=strict_onnx_provider_name,
             )
         else:
             self._backend = OnnxStyleBertVITS2Backend(
                 aivm_manager=self.aivm_manager,
                 onnx_providers=self.onnx_providers,
+                strict_provider_name=strict_onnx_provider_name,
             )
 
         # Style-Bert-VITS2 本体のロガーを抑制

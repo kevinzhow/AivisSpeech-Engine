@@ -96,6 +96,121 @@ interleaved ffmpeg AAC encoding disturbing the APU benchmark, not from the Vulka
 synthesis path. The benchmark harness now queues AAC files and encodes them
 after a backend's measured synthesis loop.
 
+## GGML ONNX Plugin EP Parity
+
+This 2026-06-25 rerun compares the non-invasive ONNX Runtime Plugin EP route
+against the native Aivis ggml backend. The Plugin EP uses the normal
+`tts_backend=onnx` engine path, but registers `AivisGgmlExecutionProvider` and
+passes `claim_synthesis_graph=1` plus `claim_jp_bert_graph=1`. Both the
+synthesis ONNX/AIVMX graph and the JP-BERT ONNX graph are executed by TTS.cpp
+through the external EP.
+
+The benchmark harness now unloads Style-Bert-VITS2's process-global ONNX
+JP-BERT session before each backend is constructed. This is required because
+`style_bert_vits2.nlp.onnx_bert_models` caches one BERT session per language;
+without clearing that cache, a previous ONNX CPU baseline can leave JP-BERT on
+`CPUExecutionProvider` even when the later synthesis session uses the Plugin EP.
+The harness records `bert_active_providers` and fails a strict EP run if
+JP-BERT is not claimed by `AivisGgmlExecutionProvider`.
+
+| device | text length | ONNX CPU RTF | native ggml Vulkan RTF | ggml ONNX Plugin EP Vulkan RTF |
+| --- | --- | ---: | ---: | ---: |
+| AMD Radeon 780M | short | `0.381` | `0.218` | `0.217` |
+| AMD Radeon 780M | medium | `0.313` | `0.178` | `0.180` |
+| AMD Radeon 780M | long | `0.231` | `0.131` | `0.131` |
+| AMD Radeon 780M | overall mean | `0.309` | `0.176` | `0.176` |
+| RTX 3060 | short | `0.354` | `0.142` | `0.145` |
+| RTX 3060 | medium | `0.271` | `0.101` | `0.101` |
+| RTX 3060 | long | `0.200` | `0.062` | `0.062` |
+| RTX 3060 | overall mean | `0.275` | `0.102` | `0.102` |
+
+Provider evidence from both Plugin EP runs:
+
+```json
+{
+  "active_providers": ["AivisGgmlExecutionProvider", "CPUExecutionProvider"],
+  "bert_active_providers": ["AivisGgmlExecutionProvider", "CPUExecutionProvider"],
+  "provider_options": {
+    "backend": "vulkan",
+    "claim_jp_bert_graph": "1",
+    "claim_synthesis_graph": "1",
+    "eager_load_model": "1",
+    "precision": "accurate"
+  }
+}
+```
+
+Interpretation:
+
+- With the JP-BERT session cache fixed, the Plugin EP route is effectively tied
+  with native ggml/Vulkan: `0.176008` vs `0.176042` overall RTF on AMD 780M,
+  and `0.102431` vs `0.101817` on RTX 3060.
+- The earlier Plugin EP probe around `0.274` overall RTF was not a Vulkan
+  regression. It measured synthesis through the EP while JP-BERT was still
+  served by the previously cached ONNX CPU session.
+- The remaining per-run sample-count jitter matches the ONNX frontend's normal
+  stochastic synthesis behavior. Peak normalization stayed at `0.999969482`
+  for all three backends.
+
+## Accuracy Against ONNX CPU
+
+Accuracy was probed against ONNX CPU on the AMD Radeon 780M host after the
+Plugin EP RTF parity run. Two different checks are needed:
+
+- JP-BERT graph parity compares the supported JP-BERT ONNX graph directly:
+  ONNX CPU output `[tokens, 1024]` vs Plugin EP output `[tokens, 1024]`.
+- Synthesis graph parity compares the supported Style-Bert-VITS2 synthesis graph
+  directly with the same `phone/tone/language/BERT/style` input tensors. For
+  deterministic model comparison, `sdp_ratio=0`, `noise_scale=0`, and
+  `noise_scale_w=0` are used. The normal synthesis settings include
+  `RandomNormalLike` inside the ONNX graph, so default-noise waveform samples are
+  not valid for pointwise max/rms accuracy.
+
+JP-BERT parity:
+
+| text length | tokens | shape delta | max abs | RMS | relative RMS | SNR |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| short | `8` | `0` | `0.132941` | `0.004381` | `0.004555` | `46.83 dB` |
+| medium | `13` | `0` | `0.011683` | `0.001546` | `0.001615` | `55.84 dB` |
+| long | `43` | `0` | `0.014273` | `0.000924` | `0.000958` | `60.37 dB` |
+
+Synthesis graph parity with deterministic zero-noise inputs after the
+TTS.cpp F32 Conv1D fix. This run keeps JP-BERT on ONNX CPU and lets the Plugin
+EP claim the synthesis graph, so the numbers isolate the Style-Bert-VITS2
+synthesis runner:
+
+| text length | phones | sample delta | max abs | RMS | relative RMS | SNR |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| short | `27` | `0` | `0.003418` | `0.000233` | `0.001506` | `56.45 dB` |
+| medium | `43` | `0` | `0.001923` | `0.000135` | `0.000753` | `62.47 dB` |
+| long | `195` | `0` | `0.030548` | `0.000691` | `0.004917` | `46.17 dB` |
+
+Interpretation:
+
+- JP-BERT is close enough for the current Plugin EP route: shapes match exactly,
+  RMS is below `0.005`, and long-text relative RMS is below `0.1%`.
+- Synthesis is still not bit-exact against ONNX CPU, but the raw output lengths
+  now match for all benchmark texts and deterministic relative RMS stays below
+  `0.5%` when JP-BERT is held on ONNX CPU.
+- Root cause of the earlier short-text `+512` sample error was upstream of
+  `ceil`: Style-Bert-VITS2 was using `ggml_conv_1d`, whose implementation lowers
+  through F16 im2col. That F16 input conversion made the text encoder input drift
+  by `max_abs=0.011486`, and the duration predictor drift by `max_abs=0.000536`.
+  One token then landed at `w=2.00005`, so direct `ceil(w)` expanded it to `3`
+  frames while ONNX CPU stayed at `2` frames.
+- TTS.cpp now routes Style-Bert-VITS2 Conv1D through the F32
+  `ggml_kokoro_conv_1d` path. The same fixture now has text encoder input
+  `max_abs=8.01086e-05` and duration predictor `max_abs=2.38419e-06`.
+  The small duration `ceil` epsilon remains as a boundary guard, but it is not
+  the primary fix.
+- When the Plugin EP also claims JP-BERT, raw deterministic sample counts still
+  match, but waveform relative RMS is higher (`1.8%` to `3.6%` in the latest
+  probe). Remaining waveform work should therefore focus on JP-BERT ggml parity
+  separately from synthesis duration parity.
+- Therefore the current status is performance parity with native ggml/Vulkan,
+  JP-BERT numerical parity is acceptable, and the supported deterministic
+  synthesis graph is accurate enough for the current Plugin EP acceptance gate.
+
 ## Vulkan Fused ConvTranspose1D Evaluation
 
 Same text set and `warm_steady_state` profile, using the local fused
@@ -276,6 +391,7 @@ export JP_BERT_GGUF_PATH="<path-to-HF-kevinzhow/style-bert-vits2-gguf/frontend/s
 export TTS_CPP_DIR="<path-to-TTS.cpp>"
 export TTS_CPP_VULKAN_BUILD_DIR="$TTS_CPP_DIR/build-vulkan-latest-main"
 export TTS_CPP_NATIVE_BUILD_DIR="$TTS_CPP_DIR/build-native-binding-shared"
+export AIVIS_GGML_ONNX_EP_LIBRARY_PATH="<path-to-libaivis_ggml_onnx_ep.so>"
 export BENCHMARK_OUTPUT_DIR="<path-to-benchmark-output-dir>"
 ```
 
@@ -291,6 +407,9 @@ uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --jp_bert_gguf_path "$JP_BERT_GGUF_PATH" \
   --tts_server_path "$TTS_CPP_VULKAN_BUILD_DIR/bin/tts-server" \
   --ggml_native_library_path "$TTS_CPP_NATIVE_BUILD_DIR/src/libtts.so" \
+  --onnx_ep_library_path "$AIVIS_GGML_ONNX_EP_LIBRARY_PATH" \
+  --onnx_ep_backend vulkan \
+  --onnx_ep_vulkan_precision accurate \
   --onnx_baseline cpu \
   --onnx_baseline cuda \
   --ggml_backend vulkan \
@@ -319,6 +438,9 @@ uv run python tools/benchmark_style_bert_vits2_ggml_vulkan.py \
   --jp_bert_gguf_path "$JP_BERT_GGUF_PATH" \
   --tts_server_path "$TTS_CPP_VULKAN_BUILD_DIR/bin/tts-server" \
   --ggml_native_library_path "$TTS_CPP_NATIVE_BUILD_DIR/src/libtts.so" \
+  --onnx_ep_library_path "$AIVIS_GGML_ONNX_EP_LIBRARY_PATH" \
+  --onnx_ep_backend vulkan \
+  --onnx_ep_vulkan_precision accurate \
   --onnx_baseline cpu \
   --onnx_baseline cuda \
   --ggml_backend vulkan \
