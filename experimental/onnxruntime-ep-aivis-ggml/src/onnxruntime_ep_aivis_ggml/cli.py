@@ -299,6 +299,60 @@ def compile_cache_main() -> None:
         raise SystemExit(1)
 
 
+def compile_jp_bert_main() -> None:
+    """Run the package-owned JP-BERT GGUF compiler."""
+
+    from onnxruntime_ep_aivis_ggml.jp_bert_gguf_writer import (
+        write_tts_cpp_style_bert_vits2_jp_bert_gguf,
+    )
+
+    parser = argparse.ArgumentParser()
+    source_group = parser.add_mutually_exclusive_group(required=True)
+    source_group.add_argument(
+        "--bert-dir",
+        type=Path,
+        help=(
+            "Directory containing JP-BERT config.json, vocab.txt, tokenizer "
+            "metadata, and model.safetensors or pytorch_model.bin."
+        ),
+    )
+    source_group.add_argument(
+        "--onnx-path",
+        type=Path,
+        help=(
+            "JP-BERT ONNX model. config.json and tokenizer files are read "
+            "from the same directory."
+        ),
+    )
+    parser.add_argument("--save-path", required=True, type=Path)
+    parser.add_argument(
+        "--max-layers",
+        type=int,
+        default=None,
+        help="Debug option: export only the first N DeBERTa layers.",
+    )
+    args = parser.parse_args()
+
+    result = write_tts_cpp_style_bert_vits2_jp_bert_gguf(
+        output_path=args.save_path,
+        bert_dir=args.bert_dir,
+        onnx_path=args.onnx_path,
+        max_layers=args.max_layers,
+    )
+    print(
+        json.dumps(
+            {
+                "valid": True,
+                "jp_bert_gguf_path": str(args.save_path),
+                "jp_bert_gguf": result.to_dict(),
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 def validate_cache_main() -> None:
     """Validate a prepared GGML cache manifest before provider deployment."""
 

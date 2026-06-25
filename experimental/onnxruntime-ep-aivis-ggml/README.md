@@ -242,10 +242,13 @@ manifests.
    version drift returns prefer-recompile, unrelated EP metadata is
    not-applicable, and Aivis contract drift is unsupported. The dedicated
    GitHub Actions workflow covers public Plugin EP checks and can run the
-   real-artifact compiler/EPContext matrix on manual dispatch. Remaining work
-   is adding a package-owned JP-BERT GGUF writer instead of requiring an
-   external JP-BERT GGUF input, plus expanding the hosted matrix across more
-   ORT/TTS.cpp/GGUF schema versions.
+   real-artifact compiler/EPContext matrix on manual dispatch. The package now
+   also owns the JP-BERT GGUF writer for TTS.cpp's Style-Bert-VITS2 JP-BERT
+   schema, so JP-BERT can be generated from the ONNX export plus adjacent
+   `config.json`/tokenizer files, or from a Hugging Face JP-BERT directory.
+   Remaining work is expanding the hosted matrix across more
+   ORT/TTS.cpp/GGUF schema versions and running the JP-BERT writer against
+   pinned production artifacts whenever those artifacts are available.
 
 ## Native Build
 
@@ -377,6 +380,29 @@ GGUF writing, and `--require-ready` manifest validation. Its JSON output
 includes the generated `manifest.json`, `model.gguf`, cache key, and ORT
 `ep_compatibility_info` payload for model-package metadata.
 
+Run the JP-BERT GGUF compiler for TTS.cpp's Style-Bert-VITS2 JP-BERT runtime:
+
+```bash
+python tools/compile_jp_bert.py \
+  --onnx-path /path/to/jp_bert/model.onnx \
+  --save-path /path/to/cache/style-bert-vits2-jp-bert.gguf
+# or, after installing the package:
+aivis-ggml-onnx-ep-compile-jp-bert \
+  --onnx-path /path/to/jp_bert/model.onnx \
+  --save-path /path/to/cache/style-bert-vits2-jp-bert.gguf
+```
+
+The ONNX mode reads `config.json`, `vocab.txt`, and
+`tokenizer_config.json` from the same directory as `model.onnx`. For source
+Hugging Face checkpoints, pass `--bert-dir /path/to/deberta-v2-large-japanese-char-wwm`
+instead; the directory must contain `config.json`, `vocab.txt`, tokenizer
+metadata, and either `model.safetensors` or `pytorch_model.bin`.
+`model.safetensors` is read without PyTorch; legacy `pytorch_model.bin`
+requires installing the `convert-pytorch` extra or otherwise making `torch`
+available. Unknown tensor names and incomplete first-N-layer artifacts are hard
+failures, because the resulting GGUF must match the tensors TTS.cpp will
+actually load.
+
 Validate a prepared cache manifest before deployment:
 
 ```bash
@@ -429,12 +455,17 @@ synthesis/model.aivmx
 synthesis/model.gguf
 synthesis/config.json
 synthesis/style_vectors.npy
-jp_bert/model.onnx       # optional; include with jp_bert/model.gguf
-jp_bert/model.gguf       # optional; include with jp_bert/model.onnx
+jp_bert/model.onnx              # optional JP-BERT graph for EPContext tests
+jp_bert/model.gguf              # optional; generated when missing and model.onnx exists
+jp_bert/config.json             # required when model.gguf must be generated
+jp_bert/vocab.txt               # required when model.gguf must be generated
+jp_bert/tokenizer_config.json   # required when model.gguf must be generated
 ```
 
 The workflow builds the native Plugin EP against ONNX Runtime 1.26 headers,
-smoke-registers it, runs `compile_cache.py` with the synthesis files, and runs
-the EPContext round-trip fixture. The optional
+smoke-registers it, runs `compile_cache.py` with the synthesis files, generates
+`jp_bert/model.gguf` with `compile_jp_bert.py` when `jp_bert/model.onnx` is
+present and the GGUF is missing, and runs the EPContext round-trip fixture. The
+optional
 `artifact_bundle_sha256` input or
 `AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` secret pins the downloaded bundle.
