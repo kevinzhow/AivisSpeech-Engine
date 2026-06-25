@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import tarfile
+from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -101,6 +104,77 @@ def write_real_artifact_bundle_manifest(
         encoding="utf-8",
     )
     return build_real_artifact_bundle_report(root, require_manifest=True)
+
+
+def package_real_artifact_bundle(
+    bundle_dir: str | Path,
+    *,
+    output_path: str | Path,
+    matrix_id: str | None = None,
+    overwrite: bool = False,
+    overwrite_manifest: bool = False,
+) -> dict[str, Any]:
+    """Create a deterministic tar.gz for hosted real-artifact validation."""
+
+    root = Path(bundle_dir)
+    output = Path(output_path)
+    if output.exists() and not overwrite:
+        raise FileExistsError(
+            f"{output.name} already exists; pass overwrite=True to replace it."
+        )
+
+    manifest_path = root / REAL_ARTIFACT_BUNDLE_MANIFEST_NAME
+    if overwrite_manifest or not manifest_path.exists():
+        report = write_real_artifact_bundle_manifest(
+            root,
+            matrix_id=matrix_id,
+            overwrite=overwrite_manifest,
+        )
+    else:
+        report = build_real_artifact_bundle_report(root, require_manifest=True)
+
+    if report["errors"]:
+        return {
+            "archive": None,
+            "errors": report["errors"],
+            "manifest": report["manifest"],
+            "valid": False,
+        }
+
+    manifest = _load_manifest(manifest_path, [])
+    if manifest is None:
+        return {
+            "archive": None,
+            "errors": ("bundle_manifest_json_invalid",),
+            "manifest": None,
+            "valid": False,
+        }
+    relative_paths = _archive_relative_paths(manifest)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("wb") as raw_file:
+        with gzip.GzipFile(
+            filename="",
+            mode="wb",
+            fileobj=raw_file,
+            mtime=0,
+        ) as gzip_file:
+            with tarfile.open(fileobj=gzip_file, mode="w") as archive:
+                for relative_path in relative_paths:
+                    _add_bundle_file(archive, root, relative_path)
+
+    return {
+        "archive": {
+            "filename": output.name,
+            "format": "tar.gz",
+            "included_paths": tuple(relative_paths),
+            "sha256": _file_sha256(output),
+            "size_bytes": output.stat().st_size,
+        },
+        "errors": (),
+        "manifest": report["manifest"],
+        "valid": True,
+    }
 
 
 def validate_real_artifact_bundle(
@@ -328,3 +402,43 @@ def _is_absolute_or_parent_relative(value: str) -> bool:
     if posix_path.is_absolute() or windows_path.is_absolute():
         return True
     return ".." in posix_path.parts or ".." in windows_path.parts
+
+
+def _archive_relative_paths(manifest: dict[str, Any]) -> tuple[str, ...]:
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        return (REAL_ARTIFACT_BUNDLE_MANIFEST_NAME,)
+    return tuple(
+        sorted(
+            {
+                REAL_ARTIFACT_BUNDLE_MANIFEST_NAME,
+                *(
+                    value
+                    for value in artifacts.values()
+                    if isinstance(value, str) and value
+                ),
+            }
+        )
+    )
+
+
+def _add_bundle_file(archive: tarfile.TarFile, root: Path, relative_path: str) -> None:
+    file_path = root / relative_path
+    info = tarfile.TarInfo(relative_path)
+    info.size = file_path.stat().st_size
+    info.mtime = 0
+    info.mode = 0o644
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+    with file_path.open("rb") as file:
+        archive.addfile(info, file)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

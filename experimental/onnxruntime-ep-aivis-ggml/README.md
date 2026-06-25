@@ -127,6 +127,9 @@ This directory currently provides:
 - A real-artifact bundle manifest writer. It generates
   `aivis_ggml_ep_bundle.json` from the fixed hosted-bundle layout and validates
   the result before scheduled CI consumes the bundle.
+- A deterministic real-artifact bundle packager. It writes the manifest when
+  needed, emits a `.tar.gz` archive with stable file metadata, and reports the
+  SHA-256 value used by the scheduled workflow secret.
 
 The native EP reports `AivisGgmlExecutionProvider` to ONNX Runtime through the
 Plugin EP ABI. `GetCapability()` inspects ORT graphs for the known Aivis
@@ -254,12 +257,13 @@ manifests.
    package now also owns the JP-BERT GGUF writer for TTS.cpp's
    Style-Bert-VITS2 JP-BERT schema, so JP-BERT can be generated from the ONNX
    export plus adjacent `config.json`/tokenizer files, or from a Hugging Face
-   JP-BERT directory. The bundle manifest writer generates the versioned
-   `aivis_ggml_ep_bundle.json` used by scheduled CI before the validator gates
-   it. A real-artifact JP-BERT parity fixture compares Plugin EP `[tokens,
-   1024]` features against ONNX CPU. Remaining work is expanding the hosted
-   matrix across more ORT/TTS.cpp/GGUF schema versions and configuring the
-   production artifact bundle secrets.
+   JP-BERT directory. The bundle manifest writer and deterministic bundle
+   packager generate the versioned `aivis_ggml_ep_bundle.json`, `.tar.gz`, and
+   SHA-256 used by scheduled CI before the validator gates it. A real-artifact
+   JP-BERT parity fixture compares Plugin EP `[tokens, 1024]` features against
+   ONNX CPU. Remaining work is expanding the hosted matrix across more
+   ORT/TTS.cpp/GGUF schema versions and configuring the production artifact
+   bundle secrets.
 
 ## Native Build
 
@@ -463,6 +467,23 @@ aivis-ggml-onnx-ep-write-artifact-bundle-manifest /path/to/bundle/root --overwri
 The writer records the current provider/ORT/TTS.cpp/GGUF compatibility contract,
 adds optional JP-BERT artifacts only when their files are present, and then runs
 the same bundle validator. Its JSON report uses portable relative paths only.
+
+Package a validated bundle for upload and record the SHA-256 for CI:
+
+```bash
+python tools/package_artifact_bundle.py /path/to/bundle/root \
+  --output /path/to/aivis-ggml-onnx-ep-artifacts.tgz
+# or, after installing the package:
+aivis-ggml-onnx-ep-package-artifact-bundle /path/to/bundle/root \
+  --output /path/to/aivis-ggml-onnx-ep-artifacts.tgz
+```
+
+The package command creates `aivis_ggml_ep_bundle.json` when it is missing,
+validates the bundle, writes a deterministic `tar.gz`, and prints a portable
+JSON report containing the archive filename, byte size, included relative
+paths, and SHA-256. Upload that archive to stable storage, set
+`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_URL` to the uploaded URL, and set
+`AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256` to the reported SHA-256.
 
 Run the opt-in real-artifact EPContext round-trip fixture:
 

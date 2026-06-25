@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import sys
+import tarfile
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -160,6 +162,44 @@ def test_write_real_artifact_bundle_manifest_generates_canonical_manifest(
         write_real_artifact_bundle_manifest(tmp_path)
 
 
+def test_package_real_artifact_bundle_generates_deterministic_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        package_real_artifact_bundle,
+    )
+
+    _write_bundle_files(tmp_path)
+    first_archive = tmp_path.parent / "bundle-a.tgz"
+    second_archive = tmp_path.parent / "bundle-b.tgz"
+
+    first_report = package_real_artifact_bundle(
+        tmp_path,
+        output_path=first_archive,
+    )
+    second_report = package_real_artifact_bundle(
+        tmp_path,
+        output_path=second_archive,
+    )
+
+    assert first_report["valid"] is True
+    assert first_report["errors"] == ()
+    assert first_report["archive"]["filename"] == "bundle-a.tgz"
+    assert first_report["archive"]["sha256"] == _file_sha256(first_archive)
+    assert second_report["archive"]["sha256"] == _file_sha256(second_archive)
+    assert first_archive.read_bytes() == second_archive.read_bytes()
+    assert str(tmp_path) not in json.dumps(first_report, sort_keys=True)
+
+    with tarfile.open(first_archive, "r:gz") as archive:
+        names = archive.getnames()
+    assert names == sorted(names)
+    assert "aivis_ggml_ep_bundle.json" in names
+    assert "lib/libtts.so" in names
+    assert "jp_bert/model.gguf" in names
+
+
 def test_validate_real_artifact_bundle_rejects_manifest_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -253,6 +293,36 @@ def test_write_artifact_bundle_manifest_cli_outputs_portable_report(
     assert str(tmp_path) not in json.dumps(manifest, sort_keys=True)
 
 
+def test_package_artifact_bundle_cli_outputs_portable_sha_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml import cli
+
+    _write_bundle_files(tmp_path)
+    output_path = tmp_path.parent / "bundle.tgz"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "package_artifact_bundle.py",
+            str(tmp_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    cli.package_artifact_bundle_main()
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["valid"] is True
+    assert report["archive"]["filename"] == "bundle.tgz"
+    assert report["archive"]["sha256"] == _file_sha256(output_path)
+    assert str(tmp_path) not in json.dumps(report, sort_keys=True)
+
+
 def test_scheduled_workflow_requires_pinned_real_artifact_bundle() -> None:
     """The weekly real-artifact matrix must fail closed without pinned inputs."""
 
@@ -275,3 +345,11 @@ def test_scheduled_workflow_requires_pinned_real_artifact_bundle() -> None:
         "AIVIS_GGML_ONNX_EP_ARTIFACT_BUNDLE_SHA256"
     ) in workflow
     assert 'if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then' in workflow
+
+
+def _file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

@@ -519,3 +519,50 @@ def write_artifact_bundle_manifest_main() -> None:
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
     if report["errors"]:
         raise SystemExit(1)
+
+
+def package_artifact_bundle_main() -> None:
+    """Package a hosted real-artifact bundle and print its SHA-256."""
+
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        default_real_artifact_bundle_matrix_id,
+        package_real_artifact_bundle,
+    )
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("bundle_dir", type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--matrix-id",
+        default=None,
+        help=(
+            "Compatibility matrix id to record when generating the manifest. "
+            f"Defaults to: {default_real_artifact_bundle_matrix_id()}."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing archive.",
+    )
+    parser.add_argument(
+        "--overwrite-manifest",
+        action="store_true",
+        help="Regenerate aivis_ggml_ep_bundle.json before packaging.",
+    )
+    args = parser.parse_args()
+
+    try:
+        report = package_real_artifact_bundle(
+            args.bundle_dir,
+            output_path=args.output,
+            matrix_id=args.matrix_id,
+            overwrite=args.overwrite,
+            overwrite_manifest=args.overwrite_manifest,
+        )
+    except FileExistsError as ex:
+        parser.error(str(ex))
+
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    if report["errors"]:
+        raise SystemExit(1)
