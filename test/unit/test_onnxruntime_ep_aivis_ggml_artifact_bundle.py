@@ -41,6 +41,8 @@ def _write_bundle_files(root: Path, *, include_jp_bert_gguf: bool = True) -> Non
 
 
 def _write_bundle_manifest(root: Path, **overrides: object) -> None:
+    from onnxruntime_ep_aivis_ggml.cache import build_compatibility_matrix
+
     manifest = {
         "artifacts": {
             "jp_bert_config": "jp_bert/config.json",
@@ -54,6 +56,7 @@ def _write_bundle_manifest(root: Path, **overrides: object) -> None:
             "synthesis_onnx": "synthesis/model.aivmx",
             "synthesis_style_vectors": "synthesis/style_vectors.npy",
         },
+        "compatibility_matrix": build_compatibility_matrix(),
         "matrix_id": "ort-1.26.0-tts-abi1-gguf1",
         "onnxruntime": {
             "plugin_ep_api_version": 26,
@@ -165,6 +168,9 @@ def test_write_real_artifact_bundle_manifest_generates_canonical_manifest(
         "sha256": _file_sha256(tmp_path / "lib/libtts.so"),
         "size_bytes": 7,
     }
+    assert manifest["compatibility_matrix"]["compiled_model_compatibility"][
+        "version"
+    ] == "aivis-ggml-compiled-model-compatibility-v1"
     assert str(tmp_path) not in json.dumps(manifest, sort_keys=True)
     assert str(tmp_path) not in json.dumps(report, sort_keys=True)
 
@@ -187,6 +193,32 @@ def test_validate_real_artifact_bundle_rejects_artifact_digest_drift(
 
     assert validate_real_artifact_bundle(tmp_path, require_manifest=True) == (
         "bundle_manifest_artifact_digest_sha256_mismatch:synthesis_gguf",
+    )
+
+
+def test_validate_real_artifact_bundle_rejects_compatibility_matrix_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        validate_real_artifact_bundle,
+    )
+    from onnxruntime_ep_aivis_ggml.cache import build_compatibility_matrix
+
+    _write_bundle_files(tmp_path)
+    compatibility_matrix = build_compatibility_matrix()
+    compatibility_matrix["compiled_model_compatibility"] = {
+        **compatibility_matrix["compiled_model_compatibility"],
+        "ort_api_mismatch": "unsupported",
+    }
+    _write_bundle_manifest(
+        tmp_path,
+        compatibility_matrix=compatibility_matrix,
+    )
+
+    assert validate_real_artifact_bundle(tmp_path, require_manifest=True) == (
+        "bundle_manifest_compatibility_matrix_mismatch",
     )
 
 

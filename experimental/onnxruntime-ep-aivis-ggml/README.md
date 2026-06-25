@@ -585,6 +585,9 @@ without local paths. Abbreviated example:
     "synthesis_onnx": "synthesis/model.aivmx",
     "synthesis_style_vectors": "synthesis/style_vectors.npy"
   },
+  "compatibility_matrix": {
+    "version": "aivis-ggml-compatibility-matrix-v1"
+  },
   "matrix_id": "ort-1.26.0-epapi26-provider0.1.0-tts-abi1-gguf1",
   "onnxruntime": {
     "plugin_ep_api_version": 26,
@@ -602,9 +605,9 @@ without local paths. Abbreviated example:
 }
 ```
 
-The validator checks every listed artifact path, file presence, byte size, and
-SHA-256. If an optional artifact is listed in the manifest, the file must be
-present and must match its digest.
+The validator checks the full compatibility matrix, every listed artifact path,
+file presence, byte size, and SHA-256. If an optional artifact is listed in the
+manifest, the file must be present and must match its digest.
 
 The workflow builds the native Plugin EP against ONNX Runtime 1.26 headers,
 smoke-registers it, validates the real-artifact bundle, runs `compile_cache.py`

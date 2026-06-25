@@ -16,6 +16,7 @@ from onnxruntime_ep_aivis_ggml.cache import (
     PROVIDER_NAME,
     PROVIDER_VERSION,
     TESTED_ORT_RUNTIME_VERSION,
+    build_compatibility_matrix,
 )
 
 REAL_ARTIFACT_BUNDLE_VERSION = "aivis-ggml-real-artifact-bundle-v1"
@@ -66,6 +67,7 @@ def build_real_artifact_bundle_manifest(
     return {
         "artifact_digests": _build_artifact_digests(root, artifacts),
         "artifacts": artifacts,
+        "compatibility_matrix": build_compatibility_matrix(),
         "matrix_id": matrix_id or default_real_artifact_bundle_matrix_id(),
         "onnxruntime": {
             "plugin_ep_api_version": ORT_PLUGIN_EP_API_VERSION,
@@ -348,6 +350,12 @@ def _validate_manifest(
             EXPECTED_TTS_CPP_GGUF_SCHEMA_VERSION,
             "bundle_manifest_tts_cpp_gguf_schema_mismatch",
         )
+
+    compatibility_matrix = manifest.get("compatibility_matrix")
+    if not isinstance(compatibility_matrix, dict):
+        errors.append("bundle_manifest_compatibility_matrix_missing")
+    elif compatibility_matrix != build_compatibility_matrix():
+        errors.append("bundle_manifest_compatibility_matrix_mismatch")
 
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):

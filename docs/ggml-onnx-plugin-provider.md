@@ -307,7 +307,8 @@ logic back into AivisSpeech Engine.
      real-artifact bundle before the matrix runs. Scheduled runs require
      `aivis_ggml_ep_bundle.json`, which records provider version, ORT runtime
      version/API, TTS.cpp runtime ABI, GGUF schema version, matrix id, and
-     portable artifact paths plus per-artifact size/SHA-256 digests.
+     the full compatibility matrix, plus portable artifact paths and
+     per-artifact size/SHA-256 digests.
    - `aivis-ggml-onnx-ep-write-artifact-bundle-manifest` generates that bundle
      manifest from the fixed artifact layout, records the current compatibility
      contract, includes optional JP-BERT files only when present, and validates
