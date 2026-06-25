@@ -399,7 +399,7 @@ def test_compile_jp_bert_cli_outputs_writer_metadata(
 ) -> None:
     _add_external_package_src(monkeypatch)
 
-    from onnxruntime_ep_aivis_ggml import cli, jp_bert_gguf_writer
+    from onnxruntime_ep_aivis_ggml import cache, cli, jp_bert_gguf_writer
     from onnxruntime_ep_aivis_ggml.jp_bert_gguf_writer import JpBertGgufWriteResult
 
     calls: dict[str, Any] = {}
@@ -420,6 +420,14 @@ def test_compile_jp_bert_cli_outputs_writer_metadata(
         "write_tts_cpp_style_bert_vits2_jp_bert_gguf",
         fake_writer,
     )
+    monkeypatch.setattr(
+        cache,
+        "build_compiled_model_compatibility_info",
+        lambda **kwargs: {
+            "version": cache.COMPILED_MODEL_COMPATIBILITY_VERSION,
+            **kwargs,
+        },
+    )
     onnx_path = tmp_path / "jp-bert.onnx"
     output_path = tmp_path / "jp-bert.gguf"
     monkeypatch.setattr(
@@ -433,6 +441,14 @@ def test_compile_jp_bert_cli_outputs_writer_metadata(
             str(output_path),
             "--max-layers",
             "1",
+            "--backend",
+            "metal",
+            "--precision",
+            "fast",
+            "--device",
+            "gpu0",
+            "--converter-version",
+            "test-jp-bert-compiler",
         ],
     )
 
@@ -446,5 +462,13 @@ def test_compile_jp_bert_cli_outputs_writer_metadata(
         "output_path": output_path,
     }
     assert payload["valid"] is True
+    assert payload["converter_version"] == "test-jp-bert-compiler"
+    assert payload["compiled_model_compatibility_info"] == {
+        "backend": "metal",
+        "device": "gpu0",
+        "graph_kind": "jp-bert",
+        "precision": "fast",
+        "version": "aivis-ggml-compiled-model-compatibility-v1",
+    }
     assert payload["jp_bert_gguf"]["filename"] == "jp-bert.gguf"
     assert payload["jp_bert_gguf"]["source_format"] == "onnx"

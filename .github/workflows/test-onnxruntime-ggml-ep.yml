@@ -179,7 +179,17 @@ jobs:
             PYTHONPATH=experimental/onnxruntime-ep-aivis-ggml/src \
             uv run --with gguf python experimental/onnxruntime-ep-aivis-ggml/tools/compile_jp_bert.py \
               --onnx-path "$AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH" \
-              --save-path "$AIVIS_GGML_ONNX_EP_JP_BERT_GGUF_PATH"
+              --save-path "$AIVIS_GGML_ONNX_EP_JP_BERT_GGUF_PATH" \
+              --backend cpu \
+              --precision accurate \
+              --converter-version "${GITHUB_SHA}"
+          fi
+
+          if [[ -f "$AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH" ]]; then
+            AIVIS_GGML_ONNX_EP_JP_BERT_CONVERT_TEST=1 \
+            uv run --with gguf pytest \
+              test/integration/test_onnxruntime_ep_aivis_ggml.py::test_aivis_ggml_onnx_ep_writes_real_jp_bert_gguf \
+              -q
           fi
 
           export AIVIS_GGML_ONNX_EP_TEST=1

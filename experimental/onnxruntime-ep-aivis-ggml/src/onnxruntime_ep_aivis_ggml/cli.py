@@ -302,6 +302,10 @@ def compile_cache_main() -> None:
 def compile_jp_bert_main() -> None:
     """Run the package-owned JP-BERT GGUF compiler."""
 
+    from onnxruntime_ep_aivis_ggml.cache import (
+        DEFAULT_CONVERTER_VERSION,
+        build_compiled_model_compatibility_info,
+    )
     from onnxruntime_ep_aivis_ggml.jp_bert_gguf_writer import (
         write_tts_cpp_style_bert_vits2_jp_bert_gguf,
     )
@@ -331,7 +335,21 @@ def compile_jp_bert_main() -> None:
         default=None,
         help="Debug option: export only the first N DeBERTa layers.",
     )
+    parser.add_argument("--backend", default="vulkan", choices=("vulkan", "metal", "cpu"))
+    parser.add_argument("--precision", default="accurate", choices=("accurate", "fast"))
+    parser.add_argument(
+        "--device",
+        default="",
+        help="Deployment device selector recorded in compatibility metadata.",
+    )
+    parser.add_argument(
+        "--converter-version",
+        default=DEFAULT_CONVERTER_VERSION,
+        help="Versioned compiler implementation included in package metadata.",
+    )
     args = parser.parse_args()
+    if args.converter_version in {"", "unimplemented"}:
+        parser.error("JP-BERT GGUF writing requires a real --converter-version.")
 
     result = write_tts_cpp_style_bert_vits2_jp_bert_gguf(
         output_path=args.save_path,
@@ -339,12 +357,20 @@ def compile_jp_bert_main() -> None:
         onnx_path=args.onnx_path,
         max_layers=args.max_layers,
     )
+    compatibility_info = build_compiled_model_compatibility_info(
+        graph_kind="jp-bert",
+        backend=args.backend,
+        device=args.device,
+        precision=args.precision,
+    )
     print(
         json.dumps(
             {
                 "valid": True,
+                "converter_version": args.converter_version,
                 "jp_bert_gguf_path": str(args.save_path),
                 "jp_bert_gguf": result.to_dict(),
+                "compiled_model_compatibility_info": compatibility_info,
             },
             ensure_ascii=False,
             indent=2,

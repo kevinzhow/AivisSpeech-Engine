@@ -17,6 +17,7 @@ from onnx import AttributeProto
 
 _ENABLE_ENV = "AIVIS_GGML_ONNX_EP_TEST"
 _CONVERT_ENABLE_ENV = "AIVIS_GGML_ONNX_EP_CONVERT_TEST"
+_JP_BERT_CONVERT_ENABLE_ENV = "AIVIS_GGML_ONNX_EP_JP_BERT_CONVERT_TEST"
 _PROVIDER_NAME = "AivisGgmlExecutionProvider"
 
 
@@ -466,3 +467,47 @@ def test_aivis_ggml_onnx_ep_prepare_cache_writes_real_synthesis_gguf(
     assert str(model_path.parent) not in manifest_text
     assert str(config_path.parent) not in manifest_text
     assert str(style_vectors_path.parent) not in manifest_text
+
+
+def test_aivis_ggml_onnx_ep_writes_real_jp_bert_gguf(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Run the strict JP-BERT GGUF writer against a local real JP-BERT source."""
+
+    if os.getenv(_JP_BERT_CONVERT_ENABLE_ENV) != "1":
+        pytest.skip(
+            f"Set {_JP_BERT_CONVERT_ENABLE_ENV}=1 to run the JP-BERT writer test."
+        )
+
+    pytest.importorskip("gguf")
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml.jp_bert_gguf_writer import (
+        write_tts_cpp_style_bert_vits2_jp_bert_gguf,
+    )
+
+    onnx_path = _optional_path_env("AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH")
+    bert_dir = _optional_path_env("AIVIS_GGML_ONNX_EP_JP_BERT_DIR")
+    if onnx_path is None and bert_dir is None:
+        pytest.skip(
+            "AIVIS_GGML_ONNX_EP_JP_BERT_ONNX_PATH or "
+            "AIVIS_GGML_ONNX_EP_JP_BERT_DIR is required."
+        )
+
+    source_parent = onnx_path.parent if onnx_path is not None else bert_dir
+    output_path = tmp_path / "jp-bert.gguf"
+    result = write_tts_cpp_style_bert_vits2_jp_bert_gguf(
+        output_path=output_path,
+        onnx_path=onnx_path,
+        bert_dir=None if onnx_path is not None else bert_dir,
+    )
+
+    assert output_path.exists()
+    assert result.filename == "jp-bert.gguf"
+    assert result.size_bytes == output_path.stat().st_size
+    assert result.tensor_count > 0
+    assert result.layer_count > 0
+    assert result.source_format in {"onnx", "safetensors", "pytorch"}
+    result_text = json.dumps(result.to_dict(), sort_keys=True)
+    assert str(tmp_path) not in result_text
+    assert str(source_parent) not in result_text
