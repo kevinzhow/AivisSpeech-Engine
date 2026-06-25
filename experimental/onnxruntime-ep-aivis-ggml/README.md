@@ -566,10 +566,18 @@ jp_bert/tokenizer_config.json   # required when model.gguf must be generated
 The optional manifest is required on scheduled runs and may be omitted for
 manual legacy bundles. Prefer generating it with
 `aivis-ggml-onnx-ep-write-artifact-bundle-manifest` instead of hand-editing
-JSON. It records the real-artifact matrix without local paths:
+JSON. It records the real-artifact matrix and per-artifact content digests
+without local paths. Abbreviated example:
 
 ```json
 {
+  "artifact_digests": {
+    "lib_tts": {
+      "path": "lib/libtts.so",
+      "sha256": "<64 lowercase hex characters>",
+      "size_bytes": 123456
+    }
+  },
   "artifacts": {
     "lib_tts": "lib/libtts.so",
     "synthesis_config": "synthesis/config.json",
@@ -593,6 +601,10 @@ JSON. It records the real-artifact matrix without local paths:
   "version": "aivis-ggml-real-artifact-bundle-v1"
 }
 ```
+
+The validator checks every listed artifact path, file presence, byte size, and
+SHA-256. If an optional artifact is listed in the manifest, the file must be
+present and must match its digest.
 
 The workflow builds the native Plugin EP against ONNX Runtime 1.26 headers,
 smoke-registers it, validates the real-artifact bundle, runs `compile_cache.py`

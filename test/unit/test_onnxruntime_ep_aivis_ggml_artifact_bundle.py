@@ -70,6 +70,11 @@ def _write_bundle_manifest(root: Path, **overrides: object) -> None:
         "version": "aivis-ggml-real-artifact-bundle-v1",
     }
     manifest.update(overrides)
+    if "artifact_digests" not in overrides:
+        manifest["artifact_digests"] = _bundle_artifact_digests(
+            root,
+            manifest["artifacts"],
+        )
     (root / "aivis_ggml_ep_bundle.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -155,11 +160,34 @@ def test_write_real_artifact_bundle_manifest_generates_canonical_manifest(
     assert manifest["matrix_id"] == default_real_artifact_bundle_matrix_id()
     assert manifest["artifacts"]["lib_tts"] == "lib/libtts.so"
     assert manifest["artifacts"]["jp_bert_gguf"] == "jp_bert/model.gguf"
+    assert manifest["artifact_digests"]["lib_tts"] == {
+        "path": "lib/libtts.so",
+        "sha256": _file_sha256(tmp_path / "lib/libtts.so"),
+        "size_bytes": 7,
+    }
     assert str(tmp_path) not in json.dumps(manifest, sort_keys=True)
     assert str(tmp_path) not in json.dumps(report, sort_keys=True)
 
     with pytest.raises(FileExistsError):
         write_real_artifact_bundle_manifest(tmp_path)
+
+
+def test_validate_real_artifact_bundle_rejects_artifact_digest_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _add_external_package_src(monkeypatch)
+    from onnxruntime_ep_aivis_ggml.artifact_bundle import (
+        validate_real_artifact_bundle,
+    )
+
+    _write_bundle_files(tmp_path)
+    _write_bundle_manifest(tmp_path)
+    (tmp_path / "synthesis/model.gguf").write_bytes(b"drifted")
+
+    assert validate_real_artifact_bundle(tmp_path, require_manifest=True) == (
+        "bundle_manifest_artifact_digest_sha256_mismatch:synthesis_gguf",
+    )
 
 
 def test_package_real_artifact_bundle_generates_deterministic_archive(
@@ -353,3 +381,22 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _bundle_artifact_digests(
+    root: Path,
+    artifacts: dict[str, str],
+) -> dict[str, dict[str, object]]:
+    digests: dict[str, dict[str, object]] = {}
+    for name, relative_path in sorted(artifacts.items()):
+        if relative_path.startswith("/") or ".." in Path(relative_path).parts:
+            continue
+        path = root / relative_path
+        if not path.is_file():
+            continue
+        digests[name] = {
+            "path": relative_path,
+            "sha256": _file_sha256(path),
+            "size_bytes": path.stat().st_size,
+        }
+    return digests

@@ -64,6 +64,7 @@ def build_real_artifact_bundle_manifest(
             artifacts[name] = relative_path
 
     return {
+        "artifact_digests": _build_artifact_digests(root, artifacts),
         "artifacts": artifacts,
         "matrix_id": matrix_id or default_real_artifact_bundle_matrix_id(),
         "onnxruntime": {
@@ -243,7 +244,7 @@ def _build_real_artifact_bundle_report(
     if manifest_path.exists():
         manifest = _load_manifest(manifest_path, errors)
         if manifest is not None:
-            _validate_manifest(manifest, errors)
+            _validate_manifest(root, manifest, errors)
     elif require_manifest:
         errors.append("bundle_manifest_missing")
 
@@ -276,7 +277,11 @@ def _load_manifest(path: Path, errors: list[str]) -> dict[str, Any] | None:
     return payload
 
 
-def _validate_manifest(manifest: dict[str, Any], errors: list[str]) -> None:
+def _validate_manifest(
+    root: Path,
+    manifest: dict[str, Any],
+    errors: list[str],
+) -> None:
     _validate_expected_string(
         manifest,
         errors,
@@ -348,6 +353,7 @@ def _validate_manifest(manifest: dict[str, Any], errors: list[str]) -> None:
     if not isinstance(artifacts, dict):
         errors.append("bundle_manifest_artifacts_missing")
         return
+    valid_artifacts: dict[str, str] = {}
     for name, relative_path in REQUIRED_ARTIFACTS.items():
         if artifacts.get(name) != relative_path:
             errors.append(f"bundle_manifest_artifact_mismatch:{name}")
@@ -360,6 +366,12 @@ def _validate_manifest(manifest: dict[str, Any], errors: list[str]) -> None:
             errors.append(f"bundle_manifest_artifact_unknown:{name}")
         elif value != expected_path:
             errors.append(f"bundle_manifest_artifact_mismatch:{name}")
+        else:
+            valid_artifacts[name] = value
+            if not (root / value).is_file():
+                errors.append(f"bundle_manifest_artifact_file_missing:{name}")
+
+    _validate_artifact_digests(root, manifest, valid_artifacts, errors)
 
 
 def _portable_manifest_summary(manifest: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -402,6 +414,61 @@ def _is_absolute_or_parent_relative(value: str) -> bool:
     if posix_path.is_absolute() or windows_path.is_absolute():
         return True
     return ".." in posix_path.parts or ".." in windows_path.parts
+
+
+def _build_artifact_digests(
+    root: Path,
+    artifacts: dict[str, str],
+) -> dict[str, dict[str, Any]]:
+    digests: dict[str, dict[str, Any]] = {}
+    for name, relative_path in sorted(artifacts.items()):
+        file_path = root / relative_path
+        if not file_path.is_file():
+            continue
+        digests[name] = {
+            "path": relative_path,
+            "sha256": _file_sha256(file_path),
+            "size_bytes": file_path.stat().st_size,
+        }
+    return digests
+
+
+def _validate_artifact_digests(
+    root: Path,
+    manifest: dict[str, Any],
+    valid_artifacts: dict[str, str],
+    errors: list[str],
+) -> None:
+    artifact_digests = manifest.get("artifact_digests")
+    if not isinstance(artifact_digests, dict):
+        errors.append("bundle_manifest_artifact_digests_missing")
+        return
+
+    for name in artifact_digests:
+        if name not in valid_artifacts:
+            errors.append(f"bundle_manifest_artifact_digest_unknown:{name}")
+
+    for name, relative_path in valid_artifacts.items():
+        digest = artifact_digests.get(name)
+        if not isinstance(digest, dict):
+            errors.append(f"bundle_manifest_artifact_digest_missing:{name}")
+            continue
+        if digest.get("path") != relative_path:
+            errors.append(f"bundle_manifest_artifact_digest_path_mismatch:{name}")
+
+        expected_file = root / relative_path
+        if not expected_file.is_file():
+            continue
+
+        size_bytes = digest.get("size_bytes")
+        if size_bytes != expected_file.stat().st_size:
+            errors.append(f"bundle_manifest_artifact_digest_size_mismatch:{name}")
+
+        expected_sha256 = digest.get("sha256")
+        if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+            errors.append(f"bundle_manifest_artifact_digest_sha256_invalid:{name}")
+        elif expected_sha256 != _file_sha256(expected_file):
+            errors.append(f"bundle_manifest_artifact_digest_sha256_mismatch:{name}")
 
 
 def _archive_relative_paths(manifest: dict[str, Any]) -> tuple[str, ...]:
