@@ -86,6 +86,144 @@ class OnnxPluginExecutionProviderConfig:
     strict: bool = False
 
 
+@dataclass(frozen=True)
+class _OnnxExecutionProviderSelection:
+    """Resolved ONNX Runtime provider list and strict validation target."""
+
+    providers: list[str | tuple[str, dict[str, Any]]]
+    required_provider_name: str | None = None
+
+
+_ONNX_PROVIDER_CHOICES: Final[set[str]] = {
+    "auto",
+    "cpu",
+    "cuda",
+    "directml",
+    "ggml",
+}
+
+
+def _cpu_onnx_provider() -> tuple[str, dict[str, str]]:
+    return (
+        "CPUExecutionProvider",
+        {
+            "arena_extend_strategy": "kSameAsRequested",
+        },
+    )
+
+
+def _cuda_onnx_provider() -> tuple[str, dict[str, str]]:
+    return (
+        "CUDAExecutionProvider",
+        {
+            "arena_extend_strategy": "kSameAsRequested",
+            "cudnn_conv_algo_search": "DEFAULT",
+        },
+    )
+
+
+def _directml_onnx_provider() -> tuple[str, dict[str, int]]:
+    return (
+        "DmlExecutionProvider",
+        {
+            "device_id": 0,
+        },
+    )
+
+
+def _normalize_onnx_provider_name(onnx_provider: str) -> str:
+    normalized_provider = onnx_provider.lower()
+    if normalized_provider == "dml":
+        normalized_provider = "directml"
+    if normalized_provider not in _ONNX_PROVIDER_CHOICES:
+        raise ValueError(
+            f"Unsupported ONNX provider '{onnx_provider}'. "
+            f"Expected one of: {sorted(_ONNX_PROVIDER_CHOICES)}"
+        )
+    return normalized_provider
+
+
+def _require_available_onnx_provider(
+    *,
+    requested_provider_name: str,
+    runtime_provider_name: str,
+    available_providers: Sequence[str],
+) -> None:
+    if runtime_provider_name not in available_providers:
+        raise RuntimeError(
+            f"ONNX provider '{requested_provider_name}' requires "
+            f"{runtime_provider_name}, but available providers are: "
+            f"{list(available_providers)}"
+        )
+
+
+def _select_onnx_execution_providers(
+    *,
+    available_providers: Sequence[str],
+    use_gpu: bool,
+    onnx_provider: str,
+) -> _OnnxExecutionProviderSelection:
+    """Build an ONNX Runtime provider list from the requested provider mode."""
+
+    normalized_provider = _normalize_onnx_provider_name(onnx_provider)
+    cpu_provider = _cpu_onnx_provider()
+
+    if normalized_provider == "cpu":
+        logger.info("Using CPUExecutionProvider for ONNX inference.")
+        return _OnnxExecutionProviderSelection(
+            providers=[cpu_provider],
+            required_provider_name="CPUExecutionProvider",
+        )
+
+    if normalized_provider == "cuda":
+        _require_available_onnx_provider(
+            requested_provider_name=normalized_provider,
+            runtime_provider_name="CUDAExecutionProvider",
+            available_providers=available_providers,
+        )
+        logger.info("Using CUDAExecutionProvider for ONNX inference.")
+        return _OnnxExecutionProviderSelection(
+            providers=[_cuda_onnx_provider(), cpu_provider],
+            required_provider_name="CUDAExecutionProvider",
+        )
+
+    if normalized_provider == "directml":
+        _require_available_onnx_provider(
+            requested_provider_name=normalized_provider,
+            runtime_provider_name="DmlExecutionProvider",
+            available_providers=available_providers,
+        )
+        logger.info("Using DmlExecutionProvider for ONNX inference.")
+        return _OnnxExecutionProviderSelection(
+            providers=[_directml_onnx_provider(), cpu_provider],
+            required_provider_name="DmlExecutionProvider",
+        )
+
+    if normalized_provider == "ggml":
+        logger.info("Using ONNX Runtime Plugin EP for ggml inference.")
+        return _OnnxExecutionProviderSelection(providers=[cpu_provider])
+
+    if use_gpu is True and "CUDAExecutionProvider" in available_providers:
+        providers: list[str | tuple[str, dict[str, Any]]] = [_cuda_onnx_provider()]
+        if "DmlExecutionProvider" in available_providers:
+            providers.append(_directml_onnx_provider())
+        providers.append(cpu_provider)
+        logger.info("Using GPU (NVIDIA CUDA) for inference.")
+        return _OnnxExecutionProviderSelection(providers=providers)
+
+    if use_gpu is True and "DmlExecutionProvider" in available_providers:
+        logger.info("Using GPU (DirectML) for inference.")
+        return _OnnxExecutionProviderSelection(
+            providers=[_directml_onnx_provider(), cpu_provider]
+        )
+
+    if use_gpu is True:
+        logger.warning("GPU is not available. Using CPU instead.")
+    else:
+        logger.info("Using CPU for inference.")
+    return _OnnxExecutionProviderSelection(providers=[cpu_provider])
+
+
 def _configure_onnx_plugin_execution_provider(
     *,
     base_providers: Sequence[str | tuple[str, dict[str, Any]]],
@@ -215,6 +353,7 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         use_gpu: bool = False,
         load_all_models: bool = False,
         bert_model_cache_dir: Path | None = None,
+        onnx_provider: str = "auto",
         tts_backend: str = "onnx",
         ggml_vulkan_server_url: str = "http://127.0.0.1:8080",
         ggml_vulkan_model: str | None = None,
@@ -263,57 +402,20 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         ## ref: https://github.com/microsoft/onnxruntime/issues/11627#issuecomment-1137668551
         ## ref: https://skottmckay.github.io/onnxruntime/docs/reference/api/c-api.html
         self.available_onnx_providers: list[str] = onnxruntime.get_available_providers()
-        self.onnx_providers: Sequence[str | tuple[str, dict[str, Any]]] = [
-            ("CPUExecutionProvider", {
-                "arena_extend_strategy": "kSameAsRequested",
-            }),
-        ]  # fmt: skip
-
-        # NVIDIA GPU が接続されていて CUDA がインストールされていれば、CUDAExecutionProvider が利用できる
-        ## DirectML よりも CUDA の方が推論速度が速いため、優先的に利用する
-        ## Windows では若干速度は落ちるが onnxruntime-directml で代用できるのとファイルサイズが 700MB 以上あるため、
-        ## onnxruntime-gpu は既定でインストールされない (Windows で CUDA 推論したいなら各自でインストールが必要)
-        ## Windows / Linux 共に NVIDIA GPU が必要な上に CUDA 自体のサイズが巨大なため、CUDA 自体は同梱していない
-        if use_gpu is True and "CUDAExecutionProvider" in self.available_onnx_providers:
-            self.onnx_providers = []
-            # cudnn_conv_algo_search を DEFAULT にすると推論速度が大幅に向上する
-            # ref: https://medium.com/neuml/debug-onnx-gpu-performance-c9290fe07459
-            self.onnx_providers.append(("CUDAExecutionProvider", {
-                "arena_extend_strategy": "kSameAsRequested",
-                "cudnn_conv_algo_search": "DEFAULT",
-            }))  # fmt: skip
-            # DirectML が利用可能なら、フォールバックとして DmlExecutionProvider も指定する
-            if "DmlExecutionProvider" in self.available_onnx_providers:
-                self.onnx_providers.append(("DmlExecutionProvider", {
-                    "device_id": 0,
-                }))  # fmt: skip
-            # フォールバックとして CPUExecutionProvider も指定する
-            self.onnx_providers.append(("CPUExecutionProvider", {
-                "arena_extend_strategy": "kSameAsRequested",
-            }))  # fmt: skip
-            logger.info("Using GPU (NVIDIA CUDA) for inference.")
-
-        # Windows なら DirectML (DmlExecutionProvider) を利用できる
-        ## iGPU でも利用できるが、大半のケースで CPU 推論よりも大幅に遅くなる
-        elif use_gpu is True and "DmlExecutionProvider" in self.available_onnx_providers:  # fmt: skip
-            self.onnx_providers = []
-            ## TODO: より適した Direct3D 上のデバイス ID を指定できるようにする
-            self.onnx_providers.append(("DmlExecutionProvider", {
-                "device_id": 0,
-            }))  # fmt: skip
-            # フォールバックとして CPUExecutionProvider も指定する
-            self.onnx_providers.append(("CPUExecutionProvider", {
-                "arena_extend_strategy": "kSameAsRequested",
-            }))  # fmt: skip
-            logger.info("Using GPU (DirectML) for inference.")
-
-        # GPU モードが指定されているが GPU が利用できない場合は CPU にフォールバック
-        elif use_gpu is True:
-            logger.warning("GPU is not available. Using CPU instead.")
-
-        # CPU モード指定時
-        else:
-            logger.info("Using CPU for inference.")
+        normalized_onnx_provider = _normalize_onnx_provider_name(onnx_provider)
+        if normalized_onnx_provider == "ggml" and onnx_plugin_ep is None:
+            raise RuntimeError(
+                "onnx_provider='ggml' requires an ONNX Runtime Plugin EP "
+                "configuration."
+            )
+        provider_selection = _select_onnx_execution_providers(
+            available_providers=self.available_onnx_providers,
+            use_gpu=use_gpu,
+            onnx_provider=normalized_onnx_provider,
+        )
+        self.onnx_providers: Sequence[str | tuple[str, dict[str, Any]]] = (
+            provider_selection.providers
+        )
 
         self.onnx_providers = _configure_onnx_plugin_execution_provider(
             base_providers=self.onnx_providers,
@@ -322,9 +424,17 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         self.available_onnx_providers = onnxruntime.get_available_providers()
         strict_onnx_provider_name = (
             onnx_plugin_ep.provider_name
-            if onnx_plugin_ep is not None and onnx_plugin_ep.strict
-            else None
+            if onnx_plugin_ep is not None
+            and (onnx_plugin_ep.strict or normalized_onnx_provider == "ggml")
+            else provider_selection.required_provider_name
         )
+        strict_bert_provider_name = strict_onnx_provider_name
+        if (
+            onnx_plugin_ep is not None
+            and strict_bert_provider_name == onnx_plugin_ep.provider_name
+            and onnx_plugin_ep.provider_options.get("claim_jp_bert_graph") != "1"
+        ):
+            strict_bert_provider_name = None
         onnx_plugin_gguf_cache = (
             AivmGgufCache(
                 cache_dir=ggml_model_cache_dir,
@@ -477,8 +587,9 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         ## 明示的にコミットハッシュでリビジョンを指定している (こうすることで、オンライン環境でもロード時間が短縮されるメリットもある)
         start_time = time.time()
         logger.info("Loading BERT model and tokenizer...")
+        bert_session: Any
         try:
-            self._load_bert_model_and_tokenizer()
+            bert_session = self._load_bert_model_and_tokenizer()
         except (NoSuchFile, InvalidProtobuf, OSError) as ex:
             # もし BERT モデルキャッシュが破損している、正常にダウンロードできていない、または
             # ネットワークエラーにより不完全にダウンロードされた場合、一度キャッシュを全て削除してから再ダウンロードを試みる
@@ -490,13 +601,18 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             )
             self._reset_bert_model_cache()
             try:
-                self._load_bert_model_and_tokenizer()
+                bert_session = self._load_bert_model_and_tokenizer()
             except (NoSuchFile, InvalidProtobuf, OSError) as ex:
                 logger.error(
                     "Failed to load BERT model and tokenizer after cache reset.",
                     exc_info=ex,
                 )
                 raise ex
+        self._validate_strict_session_provider(
+            session=bert_session,
+            required_provider_name=strict_bert_provider_name,
+            context="JP-BERT ONNX session",
+        )
         logger.info(
             f"BERT model and tokenizer loaded. ({time.time() - start_time:.2f}s)"
         )
@@ -588,9 +704,9 @@ class StyleBertVITS2TTSEngine(TTSEngine):
         assert model_path is not None
         return model_path
 
-    def _load_bert_model_and_tokenizer(self) -> None:
+    def _load_bert_model_and_tokenizer(self) -> Any:
         """BERT モデルとトークナイザーをロードし、ローカルキャッシュを更新する。"""
-        onnx_bert_models.load_model(
+        bert_session = onnx_bert_models.load_model(
             language=Languages.JP,
             pretrained_model_name_or_path=self.BERT_MODEL_REPOSITORY,
             onnx_providers=self.onnx_providers,
@@ -603,6 +719,30 @@ class StyleBertVITS2TTSEngine(TTSEngine):
             cache_dir=str(self._bert_model_cache_dir),
             revision=self.BERT_MODEL_REVISION,
         )
+        return bert_session
+
+    @staticmethod
+    def _validate_strict_session_provider(
+        *,
+        session: Any,
+        required_provider_name: str | None,
+        context: str,
+    ) -> None:
+        """Ensure an explicit ONNX provider selection did not silently fall back."""
+
+        if required_provider_name is None:
+            return
+        get_providers = getattr(session, "get_providers", None)
+        if not callable(get_providers):
+            return
+        actual_providers = list(get_providers())
+        actual_provider = actual_providers[0] if actual_providers else None
+        if actual_provider != required_provider_name:
+            raise RuntimeError(
+                f"Strict ONNX provider mode expected {context} to use "
+                f"{required_provider_name!r}, but ONNX Runtime selected "
+                f"{actual_provider!r}. Full provider list: {actual_providers}"
+            )
 
     def _reset_bert_model_cache(self) -> None:
         """BERT モデルのキャッシュディレクトリを削除し、再ダウンロードが可能な状態に戻す。"""

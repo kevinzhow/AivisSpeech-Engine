@@ -24,6 +24,45 @@ The existing `ggml-vulkan` sidecar/native backend remains an explicit
 experimental backend. The Plugin EP path is a separate route whose purpose is
 to keep the normal ONNX frontend and AIVMX model flow intact.
 
+## Production Provider Selection
+
+The production entry point is `--onnx_provider`. It selects the ONNX Runtime
+execution provider for the Style-Bert-VITS2 ONNX path without switching away
+from `tts_backend=onnx`:
+
+```bash
+python run.py --tts_backend onnx --onnx_provider cpu
+python run.py --tts_backend onnx --onnx_provider cuda
+python run.py --tts_backend onnx --onnx_provider directml
+```
+
+`cpu`, `cuda`, and `directml` are strict selections. If the requested provider
+is not available, or ONNX Runtime silently retries with CPU during session
+creation, startup fails instead of reporting a misleading GPU run.
+
+For the Aivis ggml Plugin EP route:
+
+```bash
+python run.py \
+  --tts_backend onnx \
+  --onnx_provider ggml \
+  --ggml_tts_server_backend vulkan \
+  --ggml_vulkan_device 0 \
+  --ggml_vulkan_precision accurate \
+  --ggml_native_library_path <path-to-libtts.so>
+```
+
+`--onnx_provider ggml` automatically configures
+`AivisGgmlExecutionProvider` with `claim_synthesis_graph=1`,
+`claim_jp_bert_graph=1`, `eager_load_model=1`, the selected TTS.cpp backend,
+and `tts_cpp_library_path` from `--ggml_native_library_path`. The Plugin EP
+library is resolved from the packaged `onnxruntime_ep_aivis_ggml` wheel when
+available, then from the local development build. Use `--onnx_ep_library_path`
+to override discovery.
+
+Low-level `--onnx_ep_*` options remain available for diagnostics and release
+packaging, but normal callers should prefer `--onnx_provider ggml`.
+
 ## Aivis Registration Contract
 
 Aivis exposes generic Plugin EP controls:

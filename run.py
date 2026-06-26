@@ -29,6 +29,7 @@ truststore.inject_into_ssl()
 
 import argparse
 import gc
+import importlib
 import multiprocessing
 import os
 import sys
@@ -72,6 +73,12 @@ from voicevox_engine.utility.user_agent_utility import collect_runtime_environme
 _DEFAULT_HOST = "localhost"
 _DEFAULT_PORT = 10101
 _DEFAULT_ONNX_PLUGIN_EP_NAME = "AivisGgmlExecutionProvider"
+_ONNX_PROVIDER_CHOICES = ("auto", "cpu", "cuda", "directml", "ggml")
+_ONNX_EP_LIBRARY_BASENAMES = (
+    "libaivis_ggml_onnx_ep.so",
+    "libaivis_ggml_onnx_ep.dylib",
+    "aivis_ggml_onnx_ep.dll",
+)
 
 
 def parse_key_value_options(raw_options: list[str] | None) -> dict[str, str]:
@@ -84,6 +91,25 @@ def parse_key_value_options(raw_options: list[str] | None) -> dict[str, str]:
             raise ValueError(f"Expected KEY=VALUE, got: {raw_option}")
         parsed_options[key] = value
     return parsed_options
+
+
+def decide_onnx_provider_from_env(env_name: str) -> str | None:
+    """Read an explicit ONNX provider selection from the environment."""
+
+    env = os.getenv(env_name)
+    if env is None or env == "":
+        return None
+    provider = env.lower()
+    if provider == "dml":
+        provider = "directml"
+    if provider in _ONNX_PROVIDER_CHOICES:
+        return provider
+    msg = (
+        f"Invalid environment variable value: {env_name}={env}. "
+        f"Expected one of: {', '.join(_ONNX_PROVIDER_CHOICES)}"
+    )
+    warnings.warn(msg, stacklevel=1)
+    return None
 
 
 def decide_boolean_from_env(env_name: str) -> bool:
@@ -139,6 +165,7 @@ class Envs:
     host: str | None
     port: int | None
     use_gpu: bool
+    onnx_provider: str | None
 
 
 _env_adapter = TypeAdapter(Envs)
@@ -154,6 +181,7 @@ def read_environment_variables() -> Envs:
         host=os.getenv("VV_HOST"),
         port=decide_port_from_env("VV_PORT"),
         use_gpu=decide_boolean_from_env("VV_USE_GPU"),
+        onnx_provider=decide_onnx_provider_from_env("VV_ONNX_PROVIDER"),
     )
     return _env_adapter.validate_python(asdict(envs))
 
@@ -222,6 +250,7 @@ class _CLIArgs:
     host: str | None
     port: int | None
     use_gpu: bool | None
+    onnx_provider: str | None
     tts_backend: str
     ggml_vulkan_server_url: str
     ggml_vulkan_model: str | None
@@ -268,6 +297,71 @@ class _CLIArgs:
 _cli_args_adapter = TypeAdapter(_CLIArgs)
 
 
+def _add_local_onnx_ep_package_src_to_path() -> None:
+    package_src_path = (
+        engine_root() / "experimental" / "onnxruntime-ep-aivis-ggml" / "src"
+    )
+    if not package_src_path.exists():
+        return
+    package_src_text = str(package_src_path)
+    if package_src_text not in sys.path:
+        sys.path.insert(0, package_src_text)
+
+
+def _resolve_default_onnx_ep_library_path(explicit_path: Path | None) -> Path:
+    if explicit_path is not None:
+        return explicit_path
+
+    package_error: Exception | None = None
+    try:
+        try:
+            plugin_ep = importlib.import_module("onnxruntime_ep_aivis_ggml")
+        except ModuleNotFoundError:
+            _add_local_onnx_ep_package_src_to_path()
+            plugin_ep = importlib.import_module("onnxruntime_ep_aivis_ggml")
+        return Path(plugin_ep.get_library_path())
+    except Exception as ex:
+        package_error = ex
+
+    build_dir = engine_root() / "experimental" / "onnxruntime-ep-aivis-ggml" / "build"
+    for basename in _ONNX_EP_LIBRARY_BASENAMES:
+        for candidate in (
+            build_dir / "native" / basename,
+            build_dir / basename,
+        ):
+            if candidate.exists():
+                return candidate
+
+    raise RuntimeError(
+        "--onnx_provider ggml requires --onnx_ep_library_path or a packaged "
+        "onnxruntime_ep_aivis_ggml library."
+    ) from package_error
+
+
+def _build_ggml_onnx_ep_options(args: _CLIArgs) -> dict[str, str]:
+    provider_options = dict(args.onnx_ep_options)
+    provider_options.setdefault("backend", args.ggml_tts_server_backend)
+    provider_options.setdefault("claim_jp_bert_graph", "1")
+    provider_options.setdefault("claim_synthesis_graph", "1")
+    provider_options.setdefault("eager_load_model", "1")
+    provider_options.setdefault("n_threads", "0")
+    provider_options.setdefault("precision", args.ggml_vulkan_precision)
+    if args.ggml_native_library_path is not None:
+        provider_options.setdefault(
+            "tts_cpp_library_path",
+            str(args.ggml_native_library_path),
+        )
+    if args.ggml_vulkan_device is not None and provider_options.get("backend") != "cpu":
+        provider_options.setdefault("device", args.ggml_vulkan_device)
+
+    if provider_options.get("tts_cpp_library_path") in {None, ""}:
+        raise RuntimeError(
+            "--onnx_provider ggml requires --ggml_native_library_path or "
+            "--onnx_ep_option tts_cpp_library_path=<path-to-libtts>."
+        )
+    return provider_options
+
+
 def read_cli_arguments(envs: Envs) -> _CLIArgs:
     """コマンドライン引数を読み込む。"""
     parser = argparse.ArgumentParser(
@@ -289,6 +383,18 @@ def read_cli_arguments(envs: Envs) -> _CLIArgs:
         help=(
             "GPUを使って音声合成するか設定します。指定しない場合、代わりに環境変数 VV_USE_GPU の値が使われます。"
             "VV_USE_GPU の値が1の場合はGPUを使用し、0または空文字、値がない場合は使用されません。"
+        ),
+    )
+    parser.add_argument(
+        "--onnx_provider",
+        choices=_ONNX_PROVIDER_CHOICES,
+        default=None,
+        help=(
+            "ONNX Runtime で利用する推論 provider です。"
+            "auto は従来の --use_gpu 互換の自動選択、cpu は CPUExecutionProvider、"
+            "cuda は CUDAExecutionProvider、directml は DmlExecutionProvider、"
+            "ggml は AivisGgmlExecutionProvider を使います。"
+            "指定しない場合、代わりに環境変数 VV_ONNX_PROVIDER の値が使われます。"
         ),
     )
     parser.add_argument(
@@ -649,11 +755,24 @@ def main() -> None:
         set_output_log_utf8()
 
     use_gpu = select_first_not_none([args.use_gpu, envs.use_gpu])
+    onnx_provider = (
+        select_first_not_none_or_none([args.onnx_provider, envs.onnx_provider])
+        or "auto"
+    )
+    provider_uses_gpu = (
+        onnx_provider in {"cuda", "directml", "ggml"}
+        or (onnx_provider == "auto" and use_gpu is True)
+    )
+    if onnx_provider == "ggml" and args.tts_backend != "onnx":
+        raise RuntimeError(
+            "--onnx_provider ggml requires --tts_backend onnx. "
+            "Use --tts_backend ggml-vulkan for the native ggml backend instead."
+        )
 
     # この PC の動作環境情報を取得
     # 起動時の可能な限り早い段階で実行結果をキャッシュしておくのが重要
     runtime_environment = collect_runtime_environment(
-        inference_type="GPU" if use_gpu is True else "CPU"
+        inference_type="GPU" if provider_uses_gpu else "CPU"
     )
 
     # AivisHub API クライアントを初期化
@@ -699,7 +818,17 @@ def main() -> None:
         )
 
         onnx_plugin_ep = None
-        if args.onnx_ep_library_path is not None or args.onnx_ep_name is not None:
+        if onnx_provider == "ggml":
+            onnx_plugin_ep = OnnxPluginExecutionProviderConfig(
+                library_path=_resolve_default_onnx_ep_library_path(
+                    args.onnx_ep_library_path
+                ),
+                registration_name=args.onnx_ep_registration_name,
+                provider_name=args.onnx_ep_name or _DEFAULT_ONNX_PLUGIN_EP_NAME,
+                provider_options=_build_ggml_onnx_ep_options(args),
+                strict=True,
+            )
+        elif args.onnx_ep_library_path is not None or args.onnx_ep_name is not None:
             onnx_plugin_ep = OnnxPluginExecutionProviderConfig(
                 library_path=args.onnx_ep_library_path,
                 registration_name=args.onnx_ep_registration_name,
@@ -715,6 +844,7 @@ def main() -> None:
                 aivm_manager,
                 use_gpu,
                 args.load_all_models,
+                onnx_provider=onnx_provider,
                 tts_backend=args.tts_backend,
                 ggml_vulkan_server_url=args.ggml_vulkan_server_url,
                 ggml_vulkan_model=args.ggml_vulkan_model,

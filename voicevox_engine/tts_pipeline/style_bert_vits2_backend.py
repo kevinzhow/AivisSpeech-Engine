@@ -415,13 +415,13 @@ class OnnxStyleBertVITS2Backend:
         return providers
 
     def _validate_strict_provider(self, tts_model: TTSModel) -> None:
-        """Ensure ONNX Runtime did not silently fall back from a strict Plugin EP."""
+        """Ensure ONNX Runtime did not silently fall back from a strict provider."""
 
         if self._strict_provider_name is None:
             return
         if tts_model.onnx_session is None:
             raise RuntimeError(
-                "Strict ONNX Plugin EP mode expected an ONNX Runtime session, "
+                "Strict ONNX provider mode expected an ONNX Runtime session, "
                 "but the loaded model did not expose one."
             )
 
@@ -429,7 +429,7 @@ class OnnxStyleBertVITS2Backend:
         actual_provider = actual_providers[0] if actual_providers else None
         if actual_provider != self._strict_provider_name:
             raise RuntimeError(
-                "Strict ONNX Plugin EP mode expected provider "
+                "Strict ONNX provider mode expected provider "
                 f"{self._strict_provider_name!r}, but ONNX Runtime selected "
                 f"{actual_provider!r}. Full provider list: {actual_providers}"
             )

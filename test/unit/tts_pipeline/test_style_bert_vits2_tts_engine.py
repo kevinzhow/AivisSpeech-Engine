@@ -47,6 +47,7 @@ from voicevox_engine.tts_pipeline.style_bert_vits2_tts_engine import (
     _build_synthesis_performance_telemetry,
     _configure_onnx_plugin_execution_provider,
     _resolve_served_backend_label,
+    _select_onnx_execution_providers,
 )
 from voicevox_engine.tts_pipeline.tts_cpp_sidecar import ManagedTtsCppSidecar
 
@@ -602,6 +603,91 @@ def test_configure_onnx_plugin_execution_provider_raises_when_strict(
 
     assert "AivisGgmlExecutionProvider" in str(exc_info.value)
     assert "Available providers" in str(exc_info.value)
+
+
+def test_select_onnx_execution_providers_can_force_cpu() -> None:
+    """Explicit CPU mode uses only CPUExecutionProvider and validates it."""
+
+    selection = _select_onnx_execution_providers(
+        available_providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+        use_gpu=True,
+        onnx_provider="cpu",
+    )
+
+    assert selection.providers == [
+        (
+            "CPUExecutionProvider",
+            {
+                "arena_extend_strategy": "kSameAsRequested",
+            },
+        )
+    ]
+    assert selection.required_provider_name == "CPUExecutionProvider"
+
+
+def test_select_onnx_execution_providers_can_force_cuda() -> None:
+    """Explicit CUDA mode does not depend on legacy --use_gpu auto selection."""
+
+    selection = _select_onnx_execution_providers(
+        available_providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+        use_gpu=False,
+        onnx_provider="cuda",
+    )
+
+    assert selection.providers[0][0] == "CUDAExecutionProvider"
+    assert selection.providers[1][0] == "CPUExecutionProvider"
+    assert selection.required_provider_name == "CUDAExecutionProvider"
+
+
+def test_select_onnx_execution_providers_rejects_missing_cuda() -> None:
+    """Explicit CUDA mode fails early instead of silently falling back to CPU."""
+
+    with pytest.raises(RuntimeError, match="CUDAExecutionProvider"):
+        _select_onnx_execution_providers(
+            available_providers=["CPUExecutionProvider"],
+            use_gpu=False,
+            onnx_provider="cuda",
+        )
+
+
+def test_select_onnx_execution_providers_can_force_directml() -> None:
+    """Explicit DirectML mode selects DmlExecutionProvider."""
+
+    selection = _select_onnx_execution_providers(
+        available_providers=["DmlExecutionProvider", "CPUExecutionProvider"],
+        use_gpu=False,
+        onnx_provider="directml",
+    )
+
+    assert selection.providers[0][0] == "DmlExecutionProvider"
+    assert selection.providers[1][0] == "CPUExecutionProvider"
+    assert selection.required_provider_name == "DmlExecutionProvider"
+
+
+def test_select_onnx_execution_providers_ggml_uses_cpu_base_provider() -> None:
+    """ggml mode leaves acceleration to the Plugin EP prepended later."""
+
+    selection = _select_onnx_execution_providers(
+        available_providers=["CPUExecutionProvider"],
+        use_gpu=False,
+        onnx_provider="ggml",
+    )
+
+    assert selection.providers[0][0] == "CPUExecutionProvider"
+    assert selection.required_provider_name is None
+
+
+def test_validate_strict_session_provider_rejects_silent_cpu_fallback() -> None:
+    """Explicit provider modes fail if ONNX Runtime creates a CPU session."""
+
+    session = SimpleNamespace(get_providers=lambda: ["CPUExecutionProvider"])
+
+    with pytest.raises(RuntimeError, match="CUDAExecutionProvider"):
+        StyleBertVITS2TTSEngine._validate_strict_session_provider(  # noqa: SLF001
+            session=session,
+            required_provider_name="CUDAExecutionProvider",
+            context="test session",
+        )
 
 
 def test_prepare_onnx_plugin_jp_bert_provider_options_fills_cache_path(
@@ -1909,7 +1995,7 @@ def test_onnx_backend_strict_provider_rejects_ort_python_fallback() -> None:
     with pytest.raises(RuntimeError) as exc_info:
         backend._validate_strict_provider(cast(Any, tts_model))  # noqa: SLF001
 
-    assert "Strict ONNX Plugin EP mode expected provider" in str(exc_info.value)
+    assert "Strict ONNX provider mode expected provider" in str(exc_info.value)
     assert "CPUExecutionProvider" in str(exc_info.value)
 
 
