@@ -10,7 +10,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-06-19T12:27:23.213876251Z"
 exclude-newer-span = "P1W"
 
 [[package]]
@@ -21,14 +21,17 @@ dependencies = [
     { name = "aivmlib" },
     { name = "e2k" },
     { name = "fastapi" },
+    { name = "gguf" },
     { name = "gputil" },
     { name = "httpx" },
     { name = "jaconv" },
     { name = "jinja2" },
     { name = "kanalizer" },
     { name = "numpy" },
+    { name = "onnx" },
     { name = "onnxruntime", marker = "(platform_machine != 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin'" },
     { name = "onnxruntime-directml", marker = "sys_platform == 'win32'" },
+    { name = "onnxruntime-ep-aivis-ggml", extra = ["convert"] },
     { name = "onnxruntime-gpu", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "platformdirs" },
     { name = "psutil" },
@@ -38,6 +41,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "pyworld-prebuilt" },
     { name = "pyyaml" },
+    { name = "safetensors" },
     { name = "semver" },
     { name = "sentry-sdk", extra = ["fastapi"] },
     { name = "setuptools" },
@@ -78,15 +82,18 @@ requires-dist = [
     { name = "aivmlib", specifier = ">=1.2.1,<2.0.0" },
     { name = "e2k", git = "https://github.com/tsukumijima/e2k?rev=9920754e15d8c96404bef0bd81d424352fb7a48b" },
     { name = "fastapi", specifier = ">=0.115.5,<1.0.0" },
+    { name = "gguf", specifier = ">=0.17.1" },
     { name = "gputil", specifier = ">=1.4.0" },
     { name = "httpx", specifier = ">=0.28.1,<1.0.0" },
     { name = "jaconv", specifier = ">=0.3.4,<1.0.0" },
     { name = "jinja2", specifier = ">=3.1.6,<4.0.0" },
     { name = "kanalizer", specifier = ">=0.1.1" },
     { name = "numpy", specifier = ">=2.3.0" },
+    { name = "onnx", specifier = ">=1.16.0,<2.0.0" },
     { name = "onnxruntime", marker = "(platform_machine != 'x86_64' and sys_platform == 'darwin') or (platform_machine != 'x86_64' and sys_platform == 'linux')", specifier = ">=1.21.0,<2.0.0" },
     { name = "onnxruntime", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = "==1.23.0" },
     { name = "onnxruntime-directml", marker = "sys_platform == 'win32'", specifier = ">=1.21.0,<2.0.0" },
+    { name = "onnxruntime-ep-aivis-ggml", extras = ["convert"], editable = "experimental/onnxruntime-ep-aivis-ggml" },
     { name = "onnxruntime-gpu", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = ">=1.21.0,<2.0.0" },
     { name = "platformdirs", specifier = ">=4.2.0" },
     { name = "psutil", specifier = ">=6.1.1" },
@@ -96,6 +103,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.31,<1.0.0" },
     { name = "pyworld-prebuilt", specifier = ">=0.3.5.post2,<1.0.0" },
     { name = "pyyaml", specifier = ">=6.0.1" },
+    { name = "safetensors", specifier = ">=0.4.0,<1.0.0" },
     { name = "semver", specifier = ">=3.0.0" },
     { name = "sentry-sdk", extras = ["fastapi"], specifier = ">=2.19.2,<3.0.0" },
     { name = "setuptools", specifier = "<82" },
@@ -510,6 +518,21 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5f/22/2c7acbe6164ed6cfd4301e9ad2dbde69c68d22268a0f9b5b0ee6052ed3ab/g2p_en-2.1.0.tar.gz", hash = "sha256:32ecb119827a3b10ea8c1197276f4ea4f44070ae56cbbd01f0f261875f556a58", size = 3116166, upload-time = "2019-12-31T01:16:12.753Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/d9/b77dc634a7a0c0c97716ba97dd0a28cbfa6267c96f359c4f27ed71cbd284/g2p_en-2.1.0-py3-none-any.whl", hash = "sha256:2a7aabf1fc7f270fcc3349881407988c9245173c2413debbe5432f4a4f31319f", size = 3117464, upload-time = "2019-12-31T01:16:03.286Z" },
+]
+
+[[package]]
+name = "gguf"
+version = "0.19.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/48/ae/17f1308ae45cd7b08ebb521747d5b23f4efc4d172038a4e228dd5106c3ff/gguf-0.19.0.tar.gz", hash = "sha256:dbadcd6cc7ccd44256f2229fe7c2dff5e8aa5cf0612ab987fd2b1a57e428923f", size = 111220, upload-time = "2026-05-06T13:04:03.667Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b3/bb/d71d6da82763528c2c2ed6b59a9d6142c6595545a4c448e2085d155e88c2/gguf-0.19.0-py3-none-any.whl", hash = "sha256:70bcd10edfe697fb2dad6e40af2234b9d8ece9a41a99761405121ebda1c3c1cd", size = 118475, upload-time = "2026-05-06T13:04:02.588Z" },
 ]
 
 [[package]]
@@ -1022,6 +1045,29 @@ dependencies = [
 wheels = [
     { url = "https://files.pythonhosted.org/packages/be/90/99566dc6398028e7691a5b12720fd85f757a0901818b84599d28abb3f085/onnxruntime_directml-1.24.4-cp311-cp311-win_amd64.whl", hash = "sha256:96642a787e5a6f33bf043521c0f06eb1eb663f6b830e5862a2026d03f9c90543", size = 25106000, upload-time = "2026-03-17T21:47:15.438Z" },
 ]
+
+[[package]]
+name = "onnxruntime-ep-aivis-ggml"
+version = "0.1.0"
+source = { editable = "experimental/onnxruntime-ep-aivis-ggml" }
+
+[package.optional-dependencies]
+convert = [
+    { name = "gguf" },
+    { name = "numpy" },
+    { name = "onnx" },
+    { name = "safetensors" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "gguf", marker = "extra == 'convert'" },
+    { name = "numpy", marker = "extra == 'convert'" },
+    { name = "onnx", marker = "extra == 'convert'" },
+    { name = "safetensors", marker = "extra == 'convert'" },
+    { name = "torch", marker = "extra == 'convert-pytorch'" },
+]
+provides-extras = ["convert", "convert-pytorch"]
 
 [[package]]
 name = "onnxruntime-gpu"
