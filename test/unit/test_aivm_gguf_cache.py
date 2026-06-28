@@ -115,7 +115,7 @@ def test_aivm_gguf_cache_converts_safetensors_model(
     )
     assert (
         cache_key_inputs["converter_version"]
-        == "tts-cpp-style-bert-vits2-converter-v2"
+        == "tts-cpp-style-bert-vits2-converter-f16-no-embed-norm-no-ups-v1"
     )
     assert cache_key_inputs["gguf_schema_version"] == "style-bert-vits2-gguf-v1"
 

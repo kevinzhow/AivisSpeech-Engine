@@ -975,6 +975,25 @@ def test_prepare_ggml_cache_can_write_gguf_with_ready_plan(
     assert writer.uint32_values["style-bert-vits2.decoder.ups.0.kernel"] == 16
 
 
+def test_synthesis_gguf_writer_uses_safe_f16_weight_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only Vulkan-safe synthesis weights are stored as F16."""
+
+    _add_external_package_src(monkeypatch)
+
+    from onnxruntime_ep_aivis_ggml.gguf_writer import _store_as_f16
+
+    assert _store_as_f16("style_bert_vits2.decoder.conv_pre.weight")
+    assert _store_as_f16("style_bert_vits2.te.enc.ffn.0.c1.w")
+
+    assert not _store_as_f16("style_bert_vits2.text_encoder.token_embedding.weight")
+    assert not _store_as_f16("style_bert_vits2.text_encoder.norm_layers_1.0.gamma")
+    assert not _store_as_f16("style_bert_vits2.decoder.ups.0.weight")
+    assert not _store_as_f16("style_bert_vits2.decoder.conv_pre.bias")
+    assert not _store_as_f16("style_bert_vits2.style_vectors")
+
+
 def test_tts_cpp_tensor_mapping_uses_loader_compatible_names(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
